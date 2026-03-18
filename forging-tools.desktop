@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=Forging Tools
+Comment=Multi-browser window manager for SystemForge
+Exec=/home/pedro/Desktop/Repositórios/systemForge/ai-forge/forging-tools/forging-tools.sh
+Icon=/home/pedro/Desktop/Repositórios/systemForge/ai-forge/forging-tools/forging-tools.svg
+Terminal=false
+Type=Application
+Categories=Development;Utility;
+StartupWMClass=forging-tools
