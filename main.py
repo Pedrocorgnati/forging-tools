@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
 """Forging Tools — Visualize 2 WhatsApps + 2 páginas auxiliares em tela vertical."""
+import json
 import os
 import sys
+from pathlib import Path
+
+_TIMERS_FILE = Path.home() / ".forging-tools" / "timers.json"
 
 # Flags do Chromium ANTES de importar Qt — remove sinais de automação
 os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = " ".join([
@@ -10,10 +14,12 @@ os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = " ".join([
     "--disable-site-isolation-trials",
 ])
 
-from PySide6.QtCore import Qt, QPoint, QRect, QEvent, QPropertyAnimation, QEasingCurve
+from PySide6.QtCore import Qt, QPoint, QRect, QUrl, QEvent, QPropertyAnimation, QEasingCurve, Signal, QTimer, QDateTime
 from PySide6.QtGui import QMouseEvent
 from PySide6.QtWidgets import (
     QApplication,
+    QDateTimeEdit,
+    QDialog,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -26,10 +32,18 @@ from PySide6.QtWidgets import (
 )
 
 from browser_engine import BrowserEngine
-from design_tokens import app_stylesheet, ACCENT, BG, BORDER_LIGHT, SURFACE
+from design_tokens import (
+    app_stylesheet,
+    ACCENT, ACCENT_DARK, ACCENT_HOVER, BG, BORDER, BORDER_LIGHT,
+    ERROR, FONT_MONO, R_LG, R_SM, SUCCESS,
+    SURFACE, SURFACE_HOVER, TEXT, TEXT_SEC,
+)
 from forge_pick_panel import ForgePickPanel
 
 _GRIP = 6  # largura das grip zones nas bordas
+_WHATSAPP_URL = "https://web.whatsapp.com"
+_CORGNATI_URL = "https://www.corgnati.com"
+_DEFAULT_URL = "https://www.google.com"
 
 
 class _EdgeGrip(QWidget):
@@ -163,6 +177,18 @@ class RowHeader(QFrame):
         layout.setContentsMargins(0, 0, 8, 0)
         layout.setSpacing(6)
 
+        self.page_btn1 = QPushButton("①")
+        self.page_btn1.setObjectName("sidebar_btn")
+        self.page_btn1.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.page_btn1.setToolTip("Página 1")
+        layout.addWidget(self.page_btn1)
+
+        self.page_btn2 = QPushButton("②")
+        self.page_btn2.setObjectName("sidebar_btn")
+        self.page_btn2.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.page_btn2.setToolTip("Página 2")
+        layout.addWidget(self.page_btn2)
+
         label = QLabel(label_text)
         label.setObjectName("row_label")
         layout.addWidget(label)
@@ -202,9 +228,13 @@ class BrowserRow(QWidget):
     horizontalmente para dentro/fora do lado esquerdo.
     """
 
-    def __init__(self, label: str, engine: BrowserEngine, slot_id: str, parent=None):
+    def __init__(self, label: str, engine: BrowserEngine, slot_id: str,
+                 url1: str = _WHATSAPP_URL, url2: str = _CORGNATI_URL, parent=None):
         super().__init__(parent)
+        self._url1 = url1
+        self._url2 = url2
         self._sidebar_panel = None
+        self._sidebar_border = None
         self._sidebar_visible = False
         self._sidebar_anim = None
 
@@ -236,6 +266,8 @@ class BrowserRow(QWidget):
         self.header.sidebar_btn.clicked.connect(self._toggle_sidebar)
         self.header.input_btn.clicked.connect(self._toggle_url_bar)
         self._url_bar.returnPressed.connect(self._navigate_url)
+        self.header.page_btn1.clicked.connect(lambda: self._load_page(self._url1))
+        self.header.page_btn2.clicked.connect(lambda: self._load_page(self._url2))
 
         self.view.urlChanged.connect(
             lambda url: self._url_bar.setText(url.toString())
@@ -251,6 +283,17 @@ class BrowserRow(QWidget):
         panel.setVisible(False)
         self._content_layout.insertWidget(0, panel)
 
+        # Borda decorativa de alto relevo à direita do painel
+        border = QFrame()
+        border.setFixedWidth(5)
+        border.setVisible(False)
+        border.setStyleSheet(
+            "background: qlineargradient(x1:0, y1:0, x2:1, y2:0, "
+            f"stop:0 {BORDER}, stop:0.35 {TEXT_SEC}, stop:0.65 {BORDER}, stop:1 {BG});"
+        )
+        self._sidebar_border = border
+        self._content_layout.insertWidget(1, border)
+
     def toggle_sidebar_panel(self):
         """Slide the sidebar panel in/out horizontally."""
         if not self._sidebar_panel:
@@ -258,6 +301,9 @@ class BrowserRow(QWidget):
         self._sidebar_visible = not self._sidebar_visible
         panel = self._sidebar_panel
         target_w = self._sidebar_width
+
+        # Garante que minimumWidth não bloqueie a animação
+        panel.setMinimumWidth(0)
 
         if self._sidebar_visible:
             panel.setVisible(True)
@@ -269,9 +315,17 @@ class BrowserRow(QWidget):
         anim.setEndValue(target_w if self._sidebar_visible else 0)
 
         if not self._sidebar_visible:
-            anim.finished.connect(lambda: panel.setVisible(False))
+            anim.finished.connect(lambda: (
+                panel.setVisible(False),
+                self._sidebar_border.setVisible(False) if self._sidebar_border else None,
+            ))
         else:
-            anim.finished.connect(lambda: panel.setMaximumWidth(target_w))
+            # setFixedWidth trava min e max no mesmo valor — impede o layout de
+            # colapsar o painel quando view.load() dispara eventos de relayout
+            anim.finished.connect(lambda: (
+                panel.setFixedWidth(target_w),
+                self._sidebar_border.setVisible(True) if self._sidebar_border else None,
+            ))
 
         anim.start()
         self._sidebar_anim = anim
@@ -295,21 +349,173 @@ class BrowserRow(QWidget):
         else:
             self.header.input_btn.setText("▼")
 
+    def _load_page(self, url: str):
+        self.view.load(QUrl(url))
+
     def _navigate_url(self):
         url = self._url_bar.text().strip()
         if url and not url.startswith(("http://", "https://")):
             url = "https://" + url
         if url:
-            from PySide6.QtCore import QUrl
             self.view.load(QUrl(url))
+
+
+class _CountdownDisplay(QFrame):
+    """Relógio digital de contagem regressiva. Clicável para reabrir modal."""
+
+    clicked = Signal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName("countdown_frame")
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setToolTip("Clique para alterar o temporizador")
+        self.setFixedHeight(22)
+
+        inner = QHBoxLayout(self)
+        inner.setContentsMargins(7, 0, 7, 0)
+        inner.setSpacing(0)
+
+        # Parte "Xd " — metade do tamanho da fonte do tempo (7px vs 14px)
+        self._day_lbl = QLabel()
+        self._day_lbl.setObjectName("cd_day")
+        self._day_lbl.setVisible(False)
+        inner.addWidget(self._day_lbl)
+
+        # Parte HH:MM:SS
+        self._time_lbl = QLabel("--:--:--")
+        self._time_lbl.setObjectName("cd_time")
+        inner.addWidget(self._time_lbl)
+
+        self._apply_styles(expired=False)
+
+    def _apply_styles(self, expired: bool):
+        color = ERROR if expired else ACCENT_DARK
+        self.setStyleSheet(
+            f"QFrame#countdown_frame {{ background: {BG}; border: 1px solid {color}; "
+            f"border-radius: {R_SM}px; }}"
+        )
+        self._day_lbl.setStyleSheet(
+            f"QLabel#cd_day {{ color: {color}; font-family: {FONT_MONO}; "
+            f"font-size: 10px; background: transparent; padding: 0; }}"
+        )
+        self._time_lbl.setStyleSheet(
+            f"QLabel#cd_time {{ color: {color}; font-family: {FONT_MONO}; "
+            f"font-size: 14px; font-weight: bold; background: transparent; padding: 0; "
+            f"letter-spacing: 1px; }}"
+        )
+
+    def update_display(self, total_seconds: int):
+        expired = total_seconds <= 0
+        self._apply_styles(expired)
+
+        if expired:
+            self._day_lbl.setVisible(False)
+            self._time_lbl.setText("00:00:00")
+            return
+
+        days = total_seconds // 86400
+        rem = total_seconds % 86400
+        h = rem // 3600
+        rem %= 3600
+        m = rem // 60
+        s = rem % 60
+
+        if days > 0:
+            self._day_lbl.setText(f"{days}d ")
+            self._day_lbl.setVisible(True)
+        else:
+            self._day_lbl.setVisible(False)
+
+        self._time_lbl.setText(f"{h:02d}:{m:02d}:{s:02d}")
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.clicked.emit()
+        super().mousePressEvent(event)
+
+
+class TimerModal(QDialog):
+    """Modal para definir data/hora do temporizador de contagem regressiva."""
+
+    def __init__(self, target_dt=None, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Temporizador")
+        self.setFixedSize(330, 130)
+        self.setModal(True)
+        self.setStyleSheet(
+            f"QDialog {{ background: {SURFACE}; border: 1px solid {BORDER}; "
+            f"border-radius: {R_LG}px; }}"
+        )
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 14, 20, 14)
+        layout.setSpacing(10)
+
+        lbl = QLabel("Data e hora de término:")
+        lbl.setStyleSheet(f"color: {TEXT_SEC}; font-size: 12px; background: transparent;")
+        layout.addWidget(lbl)
+
+        self._dt_edit = QDateTimeEdit(self)
+        self._dt_edit.setCalendarPopup(True)
+        self._dt_edit.setDisplayFormat("dd/MM/yyyy  HH:mm:ss")
+        if target_dt:
+            self._dt_edit.setDateTime(target_dt)
+        else:
+            self._dt_edit.setDateTime(QDateTime.currentDateTime().addSecs(3600))
+        self._dt_edit.setStyleSheet(
+            f"QDateTimeEdit {{ background: {BG}; border: 1px solid {BORDER}; "
+            f"border-radius: {R_SM}px; color: {TEXT}; font-family: {FONT_MONO}; "
+            f"font-size: 13px; padding: 4px 8px; }}"
+            f"QDateTimeEdit::drop-down {{ border: none; width: 20px; }}"
+        )
+        layout.addWidget(self._dt_edit)
+
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(8)
+        btn_row.addStretch()
+
+        cancel_btn = QPushButton("Cancelar")
+        cancel_btn.setFixedSize(84, 28)
+        cancel_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        cancel_btn.setStyleSheet(
+            f"QPushButton {{ background: transparent; border: 1px solid {BORDER}; "
+            f"color: {TEXT_SEC}; font-size: 12px; border-radius: {R_SM}px; }}"
+            f"QPushButton:hover {{ background: {SURFACE_HOVER}; }}"
+        )
+        cancel_btn.clicked.connect(self.reject)
+        btn_row.addWidget(cancel_btn)
+
+        ok_btn = QPushButton("Iniciar")
+        ok_btn.setFixedSize(84, 28)
+        ok_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        ok_btn.setStyleSheet(
+            f"QPushButton {{ background: {ACCENT}; border: none; color: {BG}; "
+            f"font-size: 12px; font-weight: bold; border-radius: {R_SM}px; }}"
+            f"QPushButton:hover {{ background: {ACCENT_HOVER}; }}"
+        )
+        ok_btn.clicked.connect(self.accept)
+        btn_row.addWidget(ok_btn)
+
+        layout.addLayout(btn_row)
+
+    def selected_datetime(self):
+        return self._dt_edit.dateTime()
 
 
 class MiniViewPanel(QWidget):
     """Mini browser panel com header ▼ + URL bar toggle para Row 3."""
 
-    def __init__(self, label: str, view, parent=None):
+    def __init__(self, label: str, view, panel_id: str = "", parent=None):
         super().__init__(parent)
         self.view = view
+        self._panel_id = panel_id
+        self._slot_urls = [_DEFAULT_URL, _DEFAULT_URL]
+        self._active_slot = 0
+        self._target_dt = None
+        self._tick_timer = QTimer(self)
+        self._tick_timer.setInterval(1000)
+        self._tick_timer.timeout.connect(self._on_timer_tick)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -324,11 +530,41 @@ class MiniViewPanel(QWidget):
         header_layout.setSpacing(4)
         header_layout.setAlignment(Qt.AlignmentFlag.AlignVCenter)
 
+        self._page_btn1 = QPushButton("①")
+        self._page_btn1.setObjectName("sidebar_btn")
+        self._page_btn1.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._page_btn1.setToolTip("Página 1")
+        self._page_btn1.setFixedSize(28, 22)
+        self._page_btn1.setStyleSheet("font-size: 11px; padding: 2px 6px; min-width: 24px; min-height: 20px;")
+        header_layout.addWidget(self._page_btn1)
+
+        self._page_btn2 = QPushButton("②")
+        self._page_btn2.setObjectName("sidebar_btn")
+        self._page_btn2.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._page_btn2.setToolTip("Página 2")
+        self._page_btn2.setFixedSize(28, 22)
+        self._page_btn2.setStyleSheet("font-size: 11px; padding: 2px 6px; min-width: 24px; min-height: 20px;")
+        header_layout.addWidget(self._page_btn2)
+
         lbl = QLabel(label)
         lbl.setObjectName("row_label")
         lbl.setStyleSheet("font-size: 11px;")
         header_layout.addWidget(lbl)
         header_layout.addStretch()
+
+        # Botão relógio (visível quando não há timer)
+        self._clock_btn = QPushButton("⏱")
+        self._clock_btn.setObjectName("sidebar_btn")
+        self._clock_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._clock_btn.setToolTip("Definir temporizador")
+        self._clock_btn.setFixedSize(28, 22)
+        self._clock_btn.setStyleSheet("font-size: 11px; padding: 2px 6px; min-width: 24px; min-height: 20px;")
+        header_layout.addWidget(self._clock_btn)
+
+        # Countdown display (visível quando timer está ativo)
+        self._countdown = _CountdownDisplay()
+        self._countdown.setVisible(False)
+        header_layout.addWidget(self._countdown)
 
         self._url_btn = QPushButton("▼")
         self._url_btn.setObjectName("sidebar_btn")
@@ -352,10 +588,25 @@ class MiniViewPanel(QWidget):
 
         self._url_btn.clicked.connect(self._toggle_url_bar)
         self._url_bar.returnPressed.connect(self._navigate_url)
-        self.view.urlChanged.connect(
-            lambda url: self._url_bar.setText(url.toString())
-            if self._url_bar.isVisible() else None
-        )
+        self._page_btn1.clicked.connect(lambda: self._switch_slot(0))
+        self._page_btn2.clicked.connect(lambda: self._switch_slot(1))
+        self.view.urlChanged.connect(self._on_url_changed)
+        self._clock_btn.clicked.connect(self._open_timer_modal)
+        self._countdown.clicked.connect(self._open_timer_modal)
+
+        if self._panel_id:
+            self._load_timer()
+
+    def _switch_slot(self, slot: int):
+        self._active_slot = slot
+        self.view.load(QUrl(self._slot_urls[slot]))
+
+    def _on_url_changed(self, url):
+        url_str = url.toString()
+        if url_str.startswith("http"):
+            self._slot_urls[self._active_slot] = url_str
+        if self._url_bar.isVisible():
+            self._url_bar.setText(url_str)
 
     def _toggle_url_bar(self):
         visible = not self._url_bar.isVisible()
@@ -373,8 +624,62 @@ class MiniViewPanel(QWidget):
         if url and not url.startswith(("http://", "https://")):
             url = "https://" + url
         if url:
-            from PySide6.QtCore import QUrl
             self.view.load(QUrl(url))
+
+    def _save_timer(self):
+        if not self._panel_id:
+            return
+        try:
+            data = {}
+            if _TIMERS_FILE.exists():
+                data = json.loads(_TIMERS_FILE.read_text(encoding="utf-8"))
+            if self._target_dt:
+                data[self._panel_id] = self._target_dt.toString(Qt.DateFormat.ISODate)
+            else:
+                data.pop(self._panel_id, None)
+            _TIMERS_FILE.parent.mkdir(parents=True, exist_ok=True)
+            _TIMERS_FILE.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        except Exception:
+            pass
+
+    def _load_timer(self):
+        try:
+            if not _TIMERS_FILE.exists():
+                return
+            data = json.loads(_TIMERS_FILE.read_text(encoding="utf-8"))
+            dt_str = data.get(self._panel_id)
+            if not dt_str:
+                return
+            dt = QDateTime.fromString(dt_str, Qt.DateFormat.ISODate)
+            if not dt.isValid() or QDateTime.currentDateTime().secsTo(dt) <= 0:
+                return
+            self._target_dt = dt
+            self._clock_btn.setVisible(False)
+            self._countdown.setVisible(True)
+            self._tick_timer.start()
+            self._on_timer_tick()
+        except Exception:
+            pass
+
+    def _open_timer_modal(self):
+        modal = TimerModal(self._target_dt, self.window())
+        if modal.exec() == QDialog.DialogCode.Accepted:
+            self._target_dt = modal.selected_datetime()
+            self._clock_btn.setVisible(False)
+            self._countdown.setVisible(True)
+            self._tick_timer.start()
+            self._on_timer_tick()
+            self._save_timer()
+
+    def _on_timer_tick(self):
+        if not self._target_dt:
+            return
+        remaining = QDateTime.currentDateTime().secsTo(self._target_dt)
+        self._countdown.update_display(remaining)
+        if remaining <= 0:
+            self._tick_timer.stop()
+            self._target_dt = None
+            self._save_timer()
 
 
 class MainWindow(QMainWindow):
@@ -411,10 +716,10 @@ class MainWindow(QMainWindow):
 
         # Forge Pick embedded sidebar
         self._forge_pick_panel = ForgePickPanel()
-        self._row1.set_sidebar(self._forge_pick_panel)
+        self._row1.set_sidebar(self._forge_pick_panel, width=250)
 
         # Chevron button to toggle forge-pick sidebar
-        self._forge_pick_btn = QPushButton("◂")
+        self._forge_pick_btn = QPushButton("▸")
         self._forge_pick_btn.setObjectName("sidebar_btn")
         self._forge_pick_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._forge_pick_btn.setToolTip("Abrir Forge Pick")
@@ -456,13 +761,13 @@ class MainWindow(QMainWindow):
         view3 = self._engine.create_view(
             "slot-2", url=_AUX_URL, inject_sidebar_toggle=False
         )
-        self._mini3 = MiniViewPanel("", view3)
+        self._mini3 = MiniViewPanel("", view3, panel_id="mini3")
         self._row3_splitter.addWidget(self._mini3)
 
         view4 = self._engine.create_view(
             "slot-1", url=_AUX_URL, inject_sidebar_toggle=False
         )
-        self._mini4 = MiniViewPanel("", view4)
+        self._mini4 = MiniViewPanel("", view4, panel_id="mini4")
         self._row3_splitter.addWidget(self._mini4)
 
         self._row3_splitter.setStretchFactor(0, 1)
@@ -472,7 +777,6 @@ class MainWindow(QMainWindow):
         row3_layout.addWidget(self._row3_content)
 
         self._splitter.addWidget(self._row3_wrapper)
-        self._row3_expanded_height = 0  # capturado no primeiro show
 
         self._splitter.setStretchFactor(0, 4)
         self._splitter.setStretchFactor(1, 4)
@@ -490,49 +794,43 @@ class MainWindow(QMainWindow):
     # ── FEATURE: Row 3 collapse/expand ──
 
     def _toggle_row3(self):
-        """▾ desliza a div 3 para baixo (colapsa). ▴ desliza de volta."""
+        """▾ colapsa a div 3 inteira no splitter. ▴ restaura."""
         self._row3_visible = not self._row3_visible
 
-        # Captura a altura atual do conteúdo antes de animar
-        if self._row3_expanded_height == 0:
-            self._row3_expanded_height = self._row3_content.height()
-
-        target_height = self._row3_expanded_height if self._row3_visible else 0
-
-        anim = QPropertyAnimation(self._row3_content, b"maximumHeight", self)
-        anim.setDuration(250)
-        anim.setEasingCurve(QEasingCurve.Type.InOutQuad)
-        anim.setStartValue(self._row3_content.height())
-        anim.setEndValue(target_height)
-
-        if self._row3_visible:
-            # Ao expandir, garante que o widget está visível antes de animar
+        if not self._row3_visible:
+            # Salva tamanhos atuais e colapsa o wrapper para o tamanho do botão
+            self._row3_saved_sizes = self._splitter.sizes()
+            self._row3_content.setVisible(False)
+            self._row3_collapse_btn.setText("▴")
+            self._row3_collapse_btn.setToolTip("Mostrar painel auxiliar")
+            btn_h = 20
+            # Trava o wrapper no tamanho mínimo (só o botão)
+            self._row3_wrapper.setMinimumHeight(btn_h)
+            self._row3_wrapper.setMaximumHeight(btn_h)
+            s = self._row3_saved_sizes
+            if len(s) >= 3 and s[2] > btn_h:
+                extra = s[2] - btn_h
+                self._splitter.setSizes([s[0] + extra // 2, s[1] + extra - extra // 2, btn_h])
+        else:
+            # Remove restrições e restaura tamanhos salvos
+            self._row3_wrapper.setMinimumHeight(0)
+            self._row3_wrapper.setMaximumHeight(16777215)
             self._row3_content.setVisible(True)
             self._row3_collapse_btn.setText("▾")
             self._row3_collapse_btn.setToolTip("Esconder painel auxiliar")
-        else:
-            self._row3_collapse_btn.setText("▴")
-            self._row3_collapse_btn.setToolTip("Mostrar painel auxiliar")
-            # Ao colapsar, esconde depois que a animação terminar
-            anim.finished.connect(lambda: self._row3_content.setVisible(False))
-
-        # Remove o limite de maxHeight ao expandir, depois da animação
-        if self._row3_visible:
-            anim.finished.connect(lambda: self._row3_content.setMaximumHeight(16777215))
-
-        anim.start()
-        self._row3_anim = anim  # manter referência para GC não matar
+            if hasattr(self, '_row3_saved_sizes'):
+                self._splitter.setSizes(self._row3_saved_sizes)
 
     # ── FEATURE: Forge Pick toggle (sidebar integrada) ──
 
     def _toggle_forge_pick(self):
-        """◂ desliza o Forge Pick para dentro da div 1. ▸ desliza de volta."""
+        """▸ desliza o Forge Pick para dentro da div 1. ◂ desliza de volta."""
         visible = self._row1.toggle_sidebar_panel()
         if visible:
-            self._forge_pick_btn.setText("▸")
+            self._forge_pick_btn.setText("◂")
             self._forge_pick_btn.setToolTip("Fechar Forge Pick")
         else:
-            self._forge_pick_btn.setText("◂")
+            self._forge_pick_btn.setText("▸")
             self._forge_pick_btn.setToolTip("Abrir Forge Pick")
 
     # ── Edge grip positioning (original) ──

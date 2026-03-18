@@ -238,7 +238,7 @@ class ForgePickPanel(QWidget):
         )
         self._list_widget = QWidget()
         self._list_layout = QVBoxLayout(self._list_widget)
-        self._list_layout.setContentsMargins(8, 6, 8, 6)
+        self._list_layout.setContentsMargins(1, 6, 8, 6)
         self._list_layout.setSpacing(3)
         self._list_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
         scroll.setWidget(self._list_widget)
@@ -278,7 +278,7 @@ class ForgePickPanel(QWidget):
             f"QFrame:hover {{ background: {SURFACE}; }}"
         )
         row_layout = QHBoxLayout(row)
-        row_layout.setContentsMargins(4, 3, 4, 3)
+        row_layout.setContentsMargins(4, 3, 4, 3)  # left=4 + list=1 = 5px total
         row_layout.setSpacing(5)
 
         fav = _FavDot(name, self._reload, row)
@@ -289,6 +289,8 @@ class ForgePickPanel(QWidget):
             f"color: {TEXT}; font-size: 11px; background: transparent;"
         )
         label.setWordWrap(False)
+        label.setMaximumWidth(112)
+        label.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
         row_layout.addWidget(label, 1)
 
         json_btn = _ActionBtn("JSON", path, _YELLOW, True, row)

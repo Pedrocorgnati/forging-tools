@@ -22,7 +22,7 @@ from PySide6.QtWebEngineCore import (
     QWebEngineUrlRequestInterceptor,
 )
 from PySide6.QtWebEngineWidgets import QWebEngineView
-from PySide6.QtWidgets import QDialog, QVBoxLayout
+from PySide6.QtWidgets import QDialog, QFileDialog, QVBoxLayout
 
 logger = logging.getLogger(__name__)
 
@@ -107,6 +107,19 @@ class _OAuthPage(QWebEnginePage):
         super().__init__(profile, parent)
         self._profile = profile
         self._popup_dialogs = []
+
+    def chooseFiles(self, mode, old_files, accepted_mimetypes):
+        """Abre file dialog nativo para anexar arquivos (WhatsApp, etc)."""
+        if mode == QWebEnginePage.FileSelectionMode.FileSelectOpenMultiple:
+            files, _ = QFileDialog.getOpenFileNames(
+                None, "Selecionar arquivos", str(Path.home()), "Todos os arquivos (*)"
+            )
+        else:
+            path, _ = QFileDialog.getOpenFileName(
+                None, "Selecionar arquivo", str(Path.home()), "Todos os arquivos (*)"
+            )
+            files = [path] if path else []
+        return files
 
     def createWindow(self, window_type):
         dialog = QDialog()
@@ -350,9 +363,28 @@ class BrowserEngine(QObject):
         interceptor = _SmartHeaderInterceptor(profile)
         profile.setUrlRequestInterceptor(interceptor)
 
+        profile.downloadRequested.connect(self._on_download_requested)
+
         self._profiles[slot_id] = profile
         self._interceptors[slot_id] = interceptor
         return profile
+
+    @staticmethod
+    def _on_download_requested(download) -> None:
+        """Abre save dialog e inicia o download (arquivos recebidos no WhatsApp, etc)."""
+        suggested = download.suggestedFileName()
+        downloads_dir = Path.home() / "Downloads"
+        downloads_dir.mkdir(exist_ok=True)
+        path, _ = QFileDialog.getSaveFileName(
+            None, "Salvar arquivo", str(downloads_dir / suggested), "Todos os arquivos (*)"
+        )
+        if path:
+            dest = Path(path)
+            download.setDownloadDirectory(str(dest.parent))
+            download.setDownloadFileName(dest.name)
+            download.accept()
+        else:
+            download.cancel()
 
     def create_view(
         self,
@@ -375,6 +407,10 @@ class BrowserEngine(QObject):
         settings.setAttribute(QWebEngineSettings.WebAttribute.WebGLEnabled, True)
         settings.setAttribute(QWebEngineSettings.WebAttribute.Accelerated2dCanvasEnabled, True)
         settings.setAttribute(QWebEngineSettings.WebAttribute.PlaybackRequiresUserGesture, False)
+        settings.setAttribute(QWebEngineSettings.WebAttribute.JavascriptCanAccessClipboard, True)
+        settings.setAttribute(QWebEngineSettings.WebAttribute.JavascriptCanPaste, True)
+        settings.setAttribute(QWebEngineSettings.WebAttribute.ScreenCaptureEnabled, True)
+        settings.setAttribute(QWebEngineSettings.WebAttribute.AllowWindowActivationFromJavaScript, True)
 
         page.featurePermissionRequested.connect(self._on_permission)
 
@@ -425,6 +461,8 @@ class BrowserEngine(QObject):
             QWebEnginePage.Feature.MediaVideoCapture,
             QWebEnginePage.Feature.MediaAudioVideoCapture,
             QWebEnginePage.Feature.Notifications,
+            QWebEnginePage.Feature.DesktopVideoCapture,
+            QWebEnginePage.Feature.DesktopAudioVideoCapture,
         }
         policy = (
             QWebEnginePage.PermissionPolicy.PermissionGrantedByUser
