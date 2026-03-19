@@ -9,11 +9,13 @@ import threading
 import time
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt, QMimeData, QPoint
+from PySide6.QtGui import QDrag
 from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QPushButton,
     QScrollArea,
     QVBoxLayout,
@@ -48,24 +50,47 @@ _FAVORITES_FILE = _SCRIPT_DIR / "forge-pick" / "favorites.json"
 _SUCCESS = "#34D399"
 _YELLOW = "#F9E2AF"
 
+# Custom MIME type for drag-drop reordering
+_DRAG_MIME = "application/x-forge-pick-fav"
+
+
+# ── Favorites persistence (ordered list, not sorted set) ──
+
+def _load_favorites_ordered() -> list:
+    """Return ordered list of favorite project names (preserves drag order)."""
+    try:
+        data = json.loads(_FAVORITES_FILE.read_text(encoding="utf-8"))
+        if isinstance(data, list):
+            return data
+        return []
+    except Exception:
+        return []
+
 
 def _load_favorites() -> set:
-    try:
-        return set(json.loads(_FAVORITES_FILE.read_text(encoding="utf-8")))
-    except Exception:
-        return set()
+    return set(_load_favorites_ordered())
 
 
-def _save_favorites(favs: set) -> None:
+def _save_favorites(favs_ordered: list) -> None:
+    """Save favorites as ordered list — NO sorting, preserves user-defined order."""
     _FAVORITES_FILE.parent.mkdir(parents=True, exist_ok=True)
     _FAVORITES_FILE.write_text(
-        json.dumps(sorted(favs), ensure_ascii=False, indent=2), encoding="utf-8"
+        json.dumps(favs_ordered, ensure_ascii=False, indent=2), encoding="utf-8"
     )
 
 
-def _load_projects() -> list:
+def _toggle_favorite(name: str) -> None:
+    """Add or remove a project from favorites, preserving existing order."""
+    current = _load_favorites_ordered()
+    if name in current:
+        current.remove(name)
+    else:
+        current.append(name)
+    _save_favorites(current)
+
+
+def _load_all_projects() -> list:
     """Return list of (name, commercial_name, config_path, workspace_root)."""
-    favorites = _load_favorites()
     projects = []
     if not _PROJECTS_DIR.is_dir():
         return projects
@@ -79,7 +104,6 @@ def _load_projects() -> list:
             projects.append((name, commercial, rel_path, workspace))
         except Exception:
             pass
-    projects.sort(key=lambda p: (0 if p[0] in favorites else 1, p[0].lower()))
     return projects
 
 
@@ -91,6 +115,8 @@ def _type_worker(path: str) -> None:
         check=False,
     )
 
+
+# ── Widgets ──
 
 class _FavDot(QPushButton):
     """Small dot that toggles favourite state."""
@@ -115,12 +141,7 @@ class _FavDot(QPushButton):
         )
 
     def _toggle(self):
-        favs = _load_favorites()
-        if self._name in favs:
-            favs.discard(self._name)
-        else:
-            favs.add(self._name)
-        _save_favorites(favs)
+        _toggle_favorite(self._name)
         self._on_toggle()
 
 
@@ -154,32 +175,157 @@ class _ActionBtn(QPushButton):
             self.clicked.connect(self._on_click)
 
     def _on_click(self):
-        if self._typing:
+        threading.Thread(target=_type_worker, args=(self._path,), daemon=True).start()
+
+
+class _DragHandle(QLabel):
+    """Grip icon on the left of favorite rows — initiate drag by pulling."""
+
+    def __init__(self, row_name: str, row_widget, parent=None):
+        super().__init__("⠿", parent)
+        self._row_name = row_name
+        self._row_widget = row_widget  # reference to the full row QFrame for pixmap
+        self._drag_start = None
+
+        self.setFixedSize(14, 22)
+        self.setCursor(Qt.CursorShape.SizeVerCursor)
+        self.setStyleSheet(
+            f"color: {TEXT_TERT}; font-size: 11px; background: transparent; padding: 0;"
+        )
+        self.setToolTip("Arrastar para reordenar")
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._drag_start = event.globalPosition().toPoint()
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if (self._drag_start is not None and
+                (event.globalPosition().toPoint() - self._drag_start).manhattanLength() > 5):
+            self._start_drag()
+            self._drag_start = None
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        self._drag_start = None
+        super().mouseReleaseEvent(event)
+
+    def _start_drag(self):
+        drag = QDrag(self)
+        mime = QMimeData()
+        mime.setData(_DRAG_MIME, self._row_name.encode("utf-8"))
+        drag.setMimeData(mime)
+        if self._row_widget:
+            pixmap = self._row_widget.grab()
+            drag.setPixmap(pixmap)
+            drag.setHotSpot(QPoint(pixmap.width() // 2, pixmap.height() // 2))
+        drag.exec(Qt.DropAction.MoveAction)
+
+
+class _FavoritesContainer(QWidget):
+    """Container for favorite rows — accepts drops to reorder items."""
+
+    def __init__(self, on_reorder, parent=None):
+        super().__init__(parent)
+        self._on_reorder = on_reorder
+        self._layout = QVBoxLayout(self)
+        self._layout.setContentsMargins(0, 0, 0, 0)
+        self._layout.setSpacing(3)
+        self._row_names: list[str] = []
+
+        # Drop indicator: free-floating child NOT in layout, positioned manually
+        self._indicator = QFrame(self)
+        self._indicator.setFixedHeight(2)
+        self._indicator.setStyleSheet(f"background: {ACCENT_DARK};")
+        self._indicator.hide()
+
+        self.setAcceptDrops(True)
+
+    def add_row(self, name: str, widget: QWidget):
+        self._row_names.append(name)
+        self._layout.addWidget(widget)
+
+    def _get_drop_index(self, y: int) -> int:
+        """Map a y coordinate to a drop insertion index."""
+        count = self._layout.count()
+        for i in range(count):
+            item = self._layout.itemAt(i)
+            if item and item.widget():
+                w = item.widget()
+                if y < w.y() + w.height() // 2:
+                    return i
+        return count
+
+    def dragEnterEvent(self, event):
+        if event.mimeData().hasFormat(_DRAG_MIME):
+            event.acceptProposedAction()
+
+    def dragMoveEvent(self, event):
+        if event.mimeData().hasFormat(_DRAG_MIME):
+            idx = self._get_drop_index(int(event.position().y()))
+            self._show_indicator(idx)
+            event.acceptProposedAction()
+
+    def dragLeaveEvent(self, event):
+        self._indicator.hide()
+        super().dragLeaveEvent(event)
+
+    def dropEvent(self, event):
+        self._indicator.hide()
+        if not event.mimeData().hasFormat(_DRAG_MIME):
             return
-        self._typing = True
-        self.setText("…")
-        self.setStyleSheet(
-            f"QPushButton {{ background: {ACCENT}; color: {BG}; border: 1px solid {ACCENT}; "
-            f"border-radius: {R_SM}px; font-size: 10px; font-weight: bold; padding: 2px 4px; }}"
-        )
-        self.setCursor(Qt.CursorShape.WaitCursor)
 
-        def worker():
-            _type_worker(self._path)
-            # Restore on main thread
-            QTimer.singleShot(0, self._restore)
+        try:
+            name = bytes(event.mimeData().data(_DRAG_MIME)).decode("utf-8")
+        except Exception:
+            event.ignore()
+            return
 
-        threading.Thread(target=worker, daemon=True).start()
+        if name not in self._row_names:
+            event.ignore()
+            return
 
-    def _restore(self):
-        self._typing = False
-        self.setText(self._orig_text)
-        self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.setStyleSheet(
-            f"QPushButton {{ background: {SURFACE}; color: {self._color}; border: 1px solid {BORDER_LIGHT}; "
-            f"border-radius: {R_SM}px; font-size: 10px; font-weight: bold; padding: 2px 4px; }}"
-            f"QPushButton:hover {{ background: {SURFACE_HOVER}; border-color: {self._color}; }}"
-        )
+        drop_idx = self._get_drop_index(int(event.position().y()))
+        old_idx = self._row_names.index(name)
+
+        # Adjust: removing the element shifts indices above it
+        if old_idx < drop_idx:
+            drop_idx -= 1
+
+        if old_idx != drop_idx:
+            self._row_names.pop(old_idx)
+            self._row_names.insert(drop_idx, name)
+            self._on_reorder(list(self._row_names))
+
+        event.acceptProposedAction()
+
+    def _show_indicator(self, idx: int):
+        count = self._layout.count()
+        if count == 0:
+            self._indicator.hide()
+            return
+
+        if idx < count:
+            item = self._layout.itemAt(idx)
+            if item and item.widget():
+                y = max(0, item.widget().y() - 1)
+                self._indicator.setGeometry(0, y, self.width(), 2)
+                self._indicator.show()
+                self._indicator.raise_()
+        else:
+            item = self._layout.itemAt(count - 1)
+            if item and item.widget():
+                w = item.widget()
+                y = w.y() + w.height()
+                self._indicator.setGeometry(0, y, self.width(), 2)
+                self._indicator.show()
+                self._indicator.raise_()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if self._indicator.isVisible():
+            geo = self._indicator.geometry()
+            self._indicator.setGeometry(0, geo.y(), self.width(), 2)
 
 
 class ForgePickPanel(QWidget):
@@ -223,11 +369,18 @@ class ForgePickPanel(QWidget):
 
         layout.addWidget(header)
 
-        # Separator
-        sep = QFrame()
-        sep.setFixedHeight(1)
-        sep.setStyleSheet(f"background-color: {BORDER_LIGHT};")
-        layout.addWidget(sep)
+        # Search / grep filter bar
+        self._search_bar = QLineEdit()
+        self._search_bar.setPlaceholderText("🔍 Filtrar...")
+        self._search_bar.setFixedHeight(28)
+        self._search_bar.setStyleSheet(
+            f"QLineEdit {{ background: {SURFACE}; border: none; "
+            f"border-bottom: 1px solid {BORDER_LIGHT}; "
+            f"color: {TEXT}; font-size: 11px; padding: 2px 8px; }}"
+            f"QLineEdit:focus {{ border-bottom: 1px solid {ACCENT_DARK}; }}"
+        )
+        self._search_bar.textChanged.connect(self._on_search)
+        layout.addWidget(self._search_bar)
 
         # Scrollable project list
         scroll = QScrollArea()
@@ -251,15 +404,52 @@ class ForgePickPanel(QWidget):
 
         self._reload()
 
-    def _reload(self):
+    def _on_search(self, text: str):
+        self._reload(filter_text=text.strip().lower())
+
+    def _on_fav_reordered(self, new_visible_order: list):
+        """Persist the new favorites order after a drag-drop in the container."""
+        all_favs = _load_favorites_ordered()
+        # Visible favorites in new order first, then any that were filtered out
+        visible_set = set(new_visible_order)
+        hidden_favs = [n for n in all_favs if n not in visible_set]
+        _save_favorites(new_visible_order + hidden_favs)
+
+    def _reload(self, filter_text: str = ""):
         # Clear existing rows
         while self._list_layout.count():
             item = self._list_layout.takeAt(0)
             if item.widget():
                 item.widget().deleteLater()
 
-        projects = _load_projects()
-        if not projects:
+        all_projects = _load_all_projects()
+        fav_order = _load_favorites_ordered()
+        fav_set = set(fav_order)
+
+        # Build project map by name
+        proj_map = {p[0]: p for p in all_projects}
+
+        # Favorites in user-defined order
+        fav_projects = [proj_map[n] for n in fav_order if n in proj_map]
+
+        # Non-favorites alphabetically
+        other_projects = sorted(
+            [p for p in all_projects if p[0] not in fav_set],
+            key=lambda p: p[0].lower(),
+        )
+
+        # Apply search filter
+        if filter_text:
+            fav_projects = [
+                p for p in fav_projects
+                if filter_text in p[0].lower() or filter_text in p[1].lower()
+            ]
+            other_projects = [
+                p for p in other_projects
+                if filter_text in p[0].lower() or filter_text in p[1].lower()
+            ]
+
+        if not fav_projects and not other_projects:
             empty = QLabel("Nenhum projeto.")
             empty.setStyleSheet(
                 f"color: {TEXT_TERT}; font-size: 11px; padding: 12px; background: transparent;"
@@ -268,28 +458,59 @@ class ForgePickPanel(QWidget):
             self._list_layout.addWidget(empty)
             return
 
-        for name, commercial, path, workspace in projects:
-            self._add_row(name, commercial, path, workspace)
+        # ── Favorites section (draggable) ──
+        if fav_projects:
+            fav_container = _FavoritesContainer(self._on_fav_reordered)
+            for name, commercial, path, workspace in fav_projects:
+                row = self._make_row(name, commercial, path, workspace, is_fav=True)
+                fav_container.add_row(name, row)
+            self._list_layout.addWidget(fav_container)
 
-    def _add_row(self, name: str, commercial: str, path: str, workspace: str):
+        # Separator between favorites and regular projects
+        if fav_projects and other_projects:
+            sep = QFrame()
+            sep.setFixedHeight(1)
+            sep.setStyleSheet(f"background-color: {BORDER_LIGHT};")
+            self._list_layout.addWidget(sep)
+
+        # ── Non-favorites section (regular) ──
+        for name, commercial, path, workspace in other_projects:
+            row = self._make_row(name, commercial, path, workspace, is_fav=False)
+            self._list_layout.addWidget(row)
+
+    def _make_row(
+        self, name: str, commercial: str, path: str, workspace: str, is_fav: bool
+    ) -> QFrame:
         row = QFrame()
         row.setStyleSheet(
             f"QFrame {{ background: transparent; border-radius: {R_SM}px; }}"
             f"QFrame:hover {{ background: {SURFACE}; }}"
         )
         row_layout = QHBoxLayout(row)
-        row_layout.setContentsMargins(4, 3, 4, 3)  # left=4 + list=1 = 5px total
+        row_layout.setContentsMargins(4, 3, 4, 3)
         row_layout.setSpacing(5)
+
+        if is_fav:
+            # Drag handle — pass row reference for pixmap grab (set after full construction)
+            handle = _DragHandle(name, row)
+            row_layout.addWidget(handle)
 
         fav = _FavDot(name, self._reload, row)
         row_layout.addWidget(fav)
 
         label = QLabel(commercial)
-        label.setStyleSheet(
-            f"color: {TEXT}; font-size: 11px; background: transparent;"
-        )
+        if is_fav:
+            # Bold + 2px larger font for favorites
+            label.setStyleSheet(
+                f"color: {TEXT}; font-size: 13px; font-weight: bold; background: transparent;"
+            )
+            label.setMaximumWidth(100)  # slightly narrower to accommodate drag handle
+        else:
+            label.setStyleSheet(
+                f"color: {TEXT}; font-size: 11px; background: transparent;"
+            )
+            label.setMaximumWidth(112)
         label.setWordWrap(False)
-        label.setMaximumWidth(112)
         label.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
         row_layout.addWidget(label, 1)
 
@@ -299,4 +520,4 @@ class ForgePickPanel(QWidget):
         ws_btn = _ActionBtn("WS", workspace, _SUCCESS, bool(workspace), row)
         row_layout.addWidget(ws_btn)
 
-        self._list_layout.addWidget(row)
+        return row

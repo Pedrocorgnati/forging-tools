@@ -13,8 +13,9 @@ import re
 from pathlib import Path
 from typing import Dict, Optional
 
-from PySide6.QtCore import QObject, QUrl, Signal
+from PySide6.QtCore import QEvent, QObject, QUrl, Signal
 from PySide6.QtWebEngineCore import (
+    QWebEngineFileSystemAccessRequest,
     QWebEngineProfile,
     QWebEnginePage,
     QWebEngineScript,
@@ -89,12 +90,61 @@ class _SmartHeaderInterceptor(QWebEngineUrlRequestInterceptor):
             info.setHttpHeader(b"Sec-CH-UA-Bitness", b'"64"')
 
 
+def _choose_files(mode):
+    """Abre file dialog nativo para anexar arquivos (WhatsApp, etc)."""
+    if mode == QWebEnginePage.FileSelectionMode.FileSelectOpenMultiple:
+        files, _ = QFileDialog.getOpenFileNames(
+            None, "Selecionar arquivos", str(Path.home()), "Todos os arquivos (*)"
+        )
+    else:
+        path, _ = QFileDialog.getOpenFileName(
+            None, "Selecionar arquivo", str(Path.home()), "Todos os arquivos (*)"
+        )
+        files = [path] if path else []
+    return files
+
+
+def _grant_permission(page, url, feature):
+    """Auto-concede permissões de features (mic, cam, notificações, etc)."""
+    page.setFeaturePermission(
+        url, feature,
+        QWebEnginePage.PermissionPolicy.PermissionGrantedByUser,
+    )
+
+
+def _apply_page_settings(page):
+    """Aplica configurações padrão de WebEngine a qualquer page."""
+    s = page.settings()
+    s.setAttribute(QWebEngineSettings.WebAttribute.JavascriptCanOpenWindows, True)
+    s.setAttribute(QWebEngineSettings.WebAttribute.JavascriptEnabled, True)
+    s.setAttribute(QWebEngineSettings.WebAttribute.LocalStorageEnabled, True)
+    s.setAttribute(QWebEngineSettings.WebAttribute.WebGLEnabled, True)
+    s.setAttribute(QWebEngineSettings.WebAttribute.Accelerated2dCanvasEnabled, True)
+    s.setAttribute(QWebEngineSettings.WebAttribute.PlaybackRequiresUserGesture, False)
+    s.setAttribute(QWebEngineSettings.WebAttribute.JavascriptCanAccessClipboard, True)
+    s.setAttribute(QWebEngineSettings.WebAttribute.JavascriptCanPaste, True)
+    s.setAttribute(QWebEngineSettings.WebAttribute.ScreenCaptureEnabled, True)
+    s.setAttribute(QWebEngineSettings.WebAttribute.AllowWindowActivationFromJavaScript, True)
+    s.setAttribute(QWebEngineSettings.WebAttribute.LocalContentCanAccessFileUrls, True)
+    s.setAttribute(QWebEngineSettings.WebAttribute.LocalContentCanAccessRemoteUrls, True)
+    s.setAttribute(QWebEngineSettings.WebAttribute.AllowRunningInsecureContent, True)
+    s.setAttribute(QWebEngineSettings.WebAttribute.DnsPrefetchEnabled, True)
+
+
 class _PopupPage(QWebEnginePage):
-    """Page para popups aninhados."""
+    """Page para popups — permissões, file dialogs e nested popups."""
 
     def __init__(self, profile, dialog, parent=None):
         super().__init__(profile, parent)
         self._dialog = dialog
+        _apply_page_settings(self)
+        self.featurePermissionRequested.connect(
+            lambda url, feat: _grant_permission(self, url, feat)
+        )
+        self.fileSystemAccessRequested.connect(lambda req: req.accept())
+
+    def chooseFiles(self, mode, old_files, accepted_mimetypes):
+        return _choose_files(mode)
 
     def createWindow(self, window_type):
         return self
@@ -109,22 +159,12 @@ class _OAuthPage(QWebEnginePage):
         self._popup_dialogs = []
 
     def chooseFiles(self, mode, old_files, accepted_mimetypes):
-        """Abre file dialog nativo para anexar arquivos (WhatsApp, etc)."""
-        if mode == QWebEnginePage.FileSelectionMode.FileSelectOpenMultiple:
-            files, _ = QFileDialog.getOpenFileNames(
-                None, "Selecionar arquivos", str(Path.home()), "Todos os arquivos (*)"
-            )
-        else:
-            path, _ = QFileDialog.getOpenFileName(
-                None, "Selecionar arquivo", str(Path.home()), "Todos os arquivos (*)"
-            )
-            files = [path] if path else []
-        return files
+        return _choose_files(mode)
 
     def createWindow(self, window_type):
         dialog = QDialog()
-        dialog.setWindowTitle("Login")
-        dialog.resize(600, 700)
+        dialog.setWindowTitle("WhatsApp")
+        dialog.resize(800, 700)
         layout = QVBoxLayout(dialog)
         layout.setContentsMargins(0, 0, 0, 0)
 
@@ -143,6 +183,129 @@ class _OAuthPage(QWebEnginePage):
         dialog.show()
         return popup_page
 
+
+# ── Audio fix JS — desabilita processamento que causa voz robótica ──
+
+_AUDIO_FIX_JS = """
+(function() {
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) return;
+
+    var _origGUM = navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);
+    navigator.mediaDevices.getUserMedia = function(constraints) {
+        if (constraints && constraints.audio) {
+            var audioFix = {
+                echoCancellation: false,
+                noiseSuppression: false,
+                autoGainControl: false
+            };
+            if (typeof constraints.audio === 'boolean') {
+                constraints.audio = audioFix;
+            } else {
+                constraints.audio.echoCancellation = false;
+                constraints.audio.noiseSuppression = false;
+                constraints.audio.autoGainControl = false;
+            }
+        }
+        return _origGUM(constraints);
+    };
+
+    // Spoof permissions API — WhatsApp checa antes de pedir mídia/clipboard/storage
+    if (navigator.permissions && navigator.permissions.query) {
+        var _origQuery = navigator.permissions.query.bind(navigator.permissions);
+        var _grantedPerms = [
+            'microphone', 'camera', 'notifications', 'geolocation',
+            'clipboard-read', 'clipboard-write', 'persistent-storage',
+            'accelerometer', 'gyroscope', 'magnetometer',
+            'background-sync', 'midi', 'storage-access',
+        ];
+        navigator.permissions.query = function(desc) {
+            if (desc && _grantedPerms.indexOf(desc.name) !== -1) {
+                return Promise.resolve({ state: 'granted', onchange: null });
+            }
+            return _origQuery(desc);
+        };
+    }
+
+    // Garante que Notification.permission é 'granted'
+    if (window.Notification) {
+        Object.defineProperty(Notification, 'permission', { get: function() { return 'granted'; } });
+        Notification.requestPermission = function() { return Promise.resolve('granted'); };
+    }
+})();
+"""
+
+# ── File System Access API polyfill ──
+# WhatsApp usa showOpenFilePicker() que no QtWebEngine dispara
+# fileSystemAccessRequested (tratado no Python). Este polyfill é um
+# safety-net: se o sinal não funcionar, faz fallback para <input type="file">
+# que aciona chooseFiles() no Python.
+
+_FILE_PICKER_POLYFILL_JS = """
+(function() {
+    // Garante que showOpenFilePicker existe — se o Qt tratar via
+    // fileSystemAccessRequested, a chamada nativa funciona.
+    // Se não, este polyfill faz fallback para <input type="file">.
+    var _origPicker = window.showOpenFilePicker;
+    window.showOpenFilePicker = function(options) {
+        // Tenta o nativo primeiro
+        if (_origPicker) {
+            try { return _origPicker.call(window, options); } catch(e) {}
+        }
+        // Fallback: cria <input type="file"> invisível
+        return new Promise(function(resolve, reject) {
+            var input = document.createElement('input');
+            input.type = 'file';
+            input.style.display = 'none';
+            if (options && options.multiple) input.multiple = true;
+            if (options && options.types) {
+                var accepts = [];
+                options.types.forEach(function(t) {
+                    if (t.accept) {
+                        Object.keys(t.accept).forEach(function(mime) {
+                            var exts = t.accept[mime];
+                            if (Array.isArray(exts)) accepts = accepts.concat(exts);
+                            else accepts.push(mime);
+                        });
+                    }
+                });
+                if (accepts.length) input.accept = accepts.join(',');
+            }
+            input.addEventListener('change', function() {
+                var handles = Array.from(input.files).map(function(f) {
+                    return {
+                        kind: 'file',
+                        name: f.name,
+                        getFile: function() { return Promise.resolve(f); },
+                        createWritable: function() {
+                            return Promise.reject(new DOMException('Not supported', 'NotAllowedError'));
+                        }
+                    };
+                });
+                document.body.removeChild(input);
+                resolve(handles);
+            });
+            input.addEventListener('cancel', function() {
+                document.body.removeChild(input);
+                reject(new DOMException('The user aborted a request.', 'AbortError'));
+            });
+            document.body.appendChild(input);
+            input.click();
+        });
+    };
+
+    // showSaveFilePicker e showDirectoryPicker — stubs para não crashar
+    if (!window.showSaveFilePicker) {
+        window.showSaveFilePicker = function() {
+            return Promise.reject(new DOMException('Not supported', 'NotAllowedError'));
+        };
+    }
+    if (!window.showDirectoryPicker) {
+        window.showDirectoryPicker = function() {
+            return Promise.reject(new DOMException('Not supported', 'NotAllowedError'));
+        };
+    }
+})();
+"""
 
 # ── Anti-detect JS ──
 
@@ -330,6 +493,41 @@ def _sidebar_toggle_js(default_half: bool = True) -> str:
     """
 
 
+class _DragDropWebView(QWebEngineView):
+    """QWebEngineView com suporte completo a drag & drop de arquivos.
+
+    O widget interno do Chromium (RenderWidgetHostViewQtDelegateWidget)
+    intercepta eventos de drag antes do conteudo web. Este wrapper instala
+    um event filter no child widget para garantir que drops de arquivos
+    cheguem ao JavaScript (ex: arrastar imagem no WhatsApp).
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setAcceptDrops(True)
+        self._render_widget = None
+
+    def event(self, event):
+        if event.type() == QEvent.Type.ChildAdded:
+            child = event.child()
+            if hasattr(child, 'setAcceptDrops'):
+                child.setAcceptDrops(True)
+                child.installEventFilter(self)
+                self._render_widget = child
+        return super().event(event)
+
+    def eventFilter(self, obj, event):
+        if obj is self._render_widget and event.type() in (
+            QEvent.Type.DragEnter,
+            QEvent.Type.DragMove,
+            QEvent.Type.DragLeave,
+            QEvent.Type.Drop,
+        ):
+            event.acceptProposedAction()
+            return False  # NAO consome — deixa Chromium processar
+        return super().eventFilter(obj, event)
+
+
 class BrowserEngine(QObject):
     """Gerencia perfis WebEngine por slot com sessões compartilhadas."""
 
@@ -400,19 +598,24 @@ class BrowserEngine(QObject):
         profile = self._get_or_create_profile(slot_id)
 
         page = _OAuthPage(profile, self)
-        settings = page.settings()
-        settings.setAttribute(QWebEngineSettings.WebAttribute.JavascriptCanOpenWindows, True)
-        settings.setAttribute(QWebEngineSettings.WebAttribute.JavascriptEnabled, True)
-        settings.setAttribute(QWebEngineSettings.WebAttribute.LocalStorageEnabled, True)
-        settings.setAttribute(QWebEngineSettings.WebAttribute.WebGLEnabled, True)
-        settings.setAttribute(QWebEngineSettings.WebAttribute.Accelerated2dCanvasEnabled, True)
-        settings.setAttribute(QWebEngineSettings.WebAttribute.PlaybackRequiresUserGesture, False)
-        settings.setAttribute(QWebEngineSettings.WebAttribute.JavascriptCanAccessClipboard, True)
-        settings.setAttribute(QWebEngineSettings.WebAttribute.JavascriptCanPaste, True)
-        settings.setAttribute(QWebEngineSettings.WebAttribute.ScreenCaptureEnabled, True)
-        settings.setAttribute(QWebEngineSettings.WebAttribute.AllowWindowActivationFromJavaScript, True)
+        _apply_page_settings(page)
 
         page.featurePermissionRequested.connect(self._on_permission)
+
+        # File System Access API — CRITICO para anexar arquivos no WhatsApp
+        page.fileSystemAccessRequested.connect(self._on_fs_access)
+
+        # Audio fix + permissions spoof
+        self._inject_script(page, "audio_fix",
+                            _AUDIO_FIX_JS,
+                            QWebEngineScript.InjectionPoint.DocumentCreation,
+                            runs_on_subframes=True)
+
+        # File picker polyfill (safety net caso fileSystemAccessRequested falhe)
+        self._inject_script(page, "file_picker_polyfill",
+                            _FILE_PICKER_POLYFILL_JS,
+                            QWebEngineScript.InjectionPoint.DocumentCreation,
+                            runs_on_subframes=True)
 
         # Anti-detect
         self._inject_script(page, "antidetect",
@@ -430,7 +633,7 @@ class BrowserEngine(QObject):
             lambda ok, sid=slot_id: self.page_loaded.emit(sid, ok)
         )
 
-        view = QWebEngineView()
+        view = _DragDropWebView()
         view.setPage(page)
         view.load(QUrl(url))
         return view
@@ -456,20 +659,19 @@ class BrowserEngine(QObject):
         page = self.sender()
         if not isinstance(page, QWebEnginePage):
             return
-        granted = {
-            QWebEnginePage.Feature.MediaAudioCapture,
-            QWebEnginePage.Feature.MediaVideoCapture,
-            QWebEnginePage.Feature.MediaAudioVideoCapture,
-            QWebEnginePage.Feature.Notifications,
-            QWebEnginePage.Feature.DesktopVideoCapture,
-            QWebEnginePage.Feature.DesktopAudioVideoCapture,
-        }
-        policy = (
-            QWebEnginePage.PermissionPolicy.PermissionGrantedByUser
-            if feature in granted
-            else QWebEnginePage.PermissionPolicy.PermissionDeniedByUser
+        page.setFeaturePermission(
+            url, feature,
+            QWebEnginePage.PermissionPolicy.PermissionGrantedByUser,
         )
-        page.setFeaturePermission(url, feature, policy)
+
+    @staticmethod
+    def _on_fs_access(request: QWebEngineFileSystemAccessRequest) -> None:
+        """Auto-aceita File System Access API (showOpenFilePicker no WhatsApp)."""
+        logger.info(
+            "FS Access: path=%s, type=%s, flags=%s",
+            request.filePath(), request.handleType(), request.accessFlags(),
+        )
+        request.accept()
 
     def cleanup(self) -> None:
         """Limpa recursos sem navegar (preserva sessões)."""

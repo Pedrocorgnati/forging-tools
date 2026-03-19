@@ -6,12 +6,17 @@ import sys
 from pathlib import Path
 
 _TIMERS_FILE = Path.home() / ".forging-tools" / "timers.json"
+_URLS_FILE = Path.home() / ".forging-tools" / "mini_urls.json"
+_PROGRESS_FILE = Path.home() / ".forging-tools" / "progress.json"
 
 # Flags do Chromium ANTES de importar Qt — remove sinais de automação
 os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = " ".join([
     "--disable-blink-features=AutomationControlled",
-    "--disable-features=IsolateOrigins,site-per-process",
+    "--disable-features=IsolateOrigins,site-per-process,WebRtcHideLocalIpsWithMdns",
     "--disable-site-isolation-trials",
+    "--enable-features=WebRTCPipeWireCapturer,FileSystemAccessAPI,FileHandlingAPI",
+    "--autoplay-policy=no-user-gesture-required",
+    "--enable-clipboard-read-write",
 ])
 
 from PySide6.QtCore import Qt, QPoint, QRect, QUrl, QEvent, QPropertyAnimation, QEasingCurve, Signal, QTimer, QDateTime
@@ -25,6 +30,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QMainWindow,
+    QProgressBar,
     QPushButton,
     QSplitter,
     QVBoxLayout,
@@ -44,6 +50,7 @@ _GRIP = 6  # largura das grip zones nas bordas
 _WHATSAPP_URL = "https://web.whatsapp.com"
 _CORGNATI_URL = "https://www.corgnati.com"
 _DEFAULT_URL = "https://www.google.com"
+_CLAUDE_URL = "https://claude.ai/settings/usage"
 
 
 class _EdgeGrip(QWidget):
@@ -189,6 +196,12 @@ class RowHeader(QFrame):
         self.page_btn2.setToolTip("Página 2")
         layout.addWidget(self.page_btn2)
 
+        self.page_btn3 = QPushButton("③")
+        self.page_btn3.setObjectName("sidebar_btn")
+        self.page_btn3.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.page_btn3.setToolTip("Página 3 (localhost:3000)")
+        layout.addWidget(self.page_btn3)
+
         label = QLabel(label_text)
         label.setObjectName("row_label")
         layout.addWidget(label)
@@ -229,10 +242,12 @@ class BrowserRow(QWidget):
     """
 
     def __init__(self, label: str, engine: BrowserEngine, slot_id: str,
-                 url1: str = _WHATSAPP_URL, url2: str = _CORGNATI_URL, parent=None):
+                 url1: str = _WHATSAPP_URL, url2: str = _CORGNATI_URL,
+                 url3: str = "http://localhost:3000", parent=None):
         super().__init__(parent)
         self._url1 = url1
         self._url2 = url2
+        self._url3 = url3
         self._sidebar_panel = None
         self._sidebar_border = None
         self._sidebar_visible = False
@@ -268,6 +283,7 @@ class BrowserRow(QWidget):
         self._url_bar.returnPressed.connect(self._navigate_url)
         self.header.page_btn1.clicked.connect(lambda: self._load_page(self._url1))
         self.header.page_btn2.clicked.connect(lambda: self._load_page(self._url2))
+        self.header.page_btn3.clicked.connect(lambda: self._load_page(self._url3))
 
         self.view.urlChanged.connect(
             lambda url: self._url_bar.setText(url.toString())
@@ -503,19 +519,162 @@ class TimerModal(QDialog):
         return self._dt_edit.dateTime()
 
 
+class ProgressModal(QDialog):
+    """Modal para configurar barra de progresso com início e término."""
+
+    def __init__(self, start_dt=None, end_dt=None, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Barra de Progresso")
+        self.setFixedSize(330, 180)
+        self.setModal(True)
+        self.setStyleSheet(
+            f"QDialog {{ background: {SURFACE}; border: 1px solid {BORDER}; "
+            f"border-radius: {R_LG}px; }}"
+        )
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 14, 20, 14)
+        layout.setSpacing(8)
+
+        lbl_start = QLabel("Início do processo:")
+        lbl_start.setStyleSheet(f"color: {TEXT_SEC}; font-size: 12px; background: transparent;")
+        layout.addWidget(lbl_start)
+
+        self._start_edit = QDateTimeEdit(self)
+        self._start_edit.setCalendarPopup(True)
+        self._start_edit.setDisplayFormat("dd/MM/yyyy  HH:mm:ss")
+        self._start_edit.setDateTime(start_dt if start_dt else QDateTime.currentDateTime())
+        self._start_edit.setStyleSheet(
+            f"QDateTimeEdit {{ background: {BG}; border: 1px solid {BORDER}; "
+            f"border-radius: {R_SM}px; color: {TEXT}; font-family: {FONT_MONO}; "
+            f"font-size: 13px; padding: 4px 8px; }}"
+            f"QDateTimeEdit::drop-down {{ border: none; width: 20px; }}"
+        )
+        layout.addWidget(self._start_edit)
+
+        lbl_end = QLabel("Término do processo:")
+        lbl_end.setStyleSheet(f"color: {TEXT_SEC}; font-size: 12px; background: transparent;")
+        layout.addWidget(lbl_end)
+
+        self._end_edit = QDateTimeEdit(self)
+        self._end_edit.setCalendarPopup(True)
+        self._end_edit.setDisplayFormat("dd/MM/yyyy  HH:mm:ss")
+        self._end_edit.setDateTime(end_dt if end_dt else QDateTime.currentDateTime().addSecs(3600))
+        self._end_edit.setStyleSheet(
+            f"QDateTimeEdit {{ background: {BG}; border: 1px solid {BORDER}; "
+            f"border-radius: {R_SM}px; color: {TEXT}; font-family: {FONT_MONO}; "
+            f"font-size: 13px; padding: 4px 8px; }}"
+            f"QDateTimeEdit::drop-down {{ border: none; width: 20px; }}"
+        )
+        layout.addWidget(self._end_edit)
+
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(8)
+        btn_row.addStretch()
+
+        cancel_btn = QPushButton("Cancelar")
+        cancel_btn.setFixedSize(84, 28)
+        cancel_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        cancel_btn.setStyleSheet(
+            f"QPushButton {{ background: transparent; border: 1px solid {BORDER}; "
+            f"color: {TEXT_SEC}; font-size: 12px; border-radius: {R_SM}px; }}"
+            f"QPushButton:hover {{ background: {SURFACE_HOVER}; }}"
+        )
+        cancel_btn.clicked.connect(self.reject)
+        btn_row.addWidget(cancel_btn)
+
+        ok_btn = QPushButton("Confirmar")
+        ok_btn.setFixedSize(84, 28)
+        ok_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        ok_btn.setStyleSheet(
+            f"QPushButton {{ background: {ACCENT}; border: none; color: {BG}; "
+            f"font-size: 12px; font-weight: bold; border-radius: {R_SM}px; }}"
+            f"QPushButton:hover {{ background: {ACCENT_HOVER}; }}"
+        )
+        ok_btn.clicked.connect(self.accept)
+        btn_row.addWidget(ok_btn)
+
+        layout.addLayout(btn_row)
+
+    def selected_start(self):
+        return self._start_edit.dateTime()
+
+    def selected_end(self):
+        return self._end_edit.dateTime()
+
+
+class _ProgressWidget(QProgressBar):
+    """Barra de progresso clicável estilizada com tema dourado escuro."""
+
+    from PySide6.QtCore import Signal
+    clicked = Signal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setRange(0, 100)
+        self.setValue(0)
+        self.setFormat("%p%")
+        self.setTextVisible(True)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFixedHeight(22)
+        self.setMinimumWidth(70)
+        self.setToolTip("Clique para editar / limpar quando concluído")
+        self._apply_style(done=False)
+
+    def _apply_style(self, done: bool):
+        bar_color = SUCCESS if done else ACCENT_DARK
+        border_color = SUCCESS if done else ACCENT_DARK
+        self.setStyleSheet(f"""
+            QProgressBar {{
+                background: {BG};
+                border: 1px solid {border_color};
+                border-radius: {R_SM}px;
+                color: {bar_color};
+                font-family: {FONT_MONO};
+                font-size: 10px;
+                font-weight: bold;
+                text-align: center;
+            }}
+            QProgressBar::chunk {{
+                background: {bar_color};
+                border-radius: {R_SM}px;
+            }}
+        """)
+
+    def set_done(self, done: bool):
+        self._apply_style(done)
+        if done:
+            self.setValue(100)
+            self.setToolTip("Concluído! Clique para limpar")
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.clicked.emit()
+        super().mousePressEvent(event)
+
+
 class MiniViewPanel(QWidget):
     """Mini browser panel com header ▼ + URL bar toggle para Row 3."""
 
-    def __init__(self, label: str, view, panel_id: str = "", parent=None):
+    def __init__(self, label: str, view, panel_id: str = "", show_progress: bool = False, parent=None):
         super().__init__(parent)
         self.view = view
         self._panel_id = panel_id
-        self._slot_urls = [_DEFAULT_URL, _DEFAULT_URL]
+        self._show_progress = show_progress
+        self._slot_urls = [_DEFAULT_URL, _CLAUDE_URL]
         self._active_slot = 0
         self._target_dt = None
         self._tick_timer = QTimer(self)
         self._tick_timer.setInterval(1000)
         self._tick_timer.timeout.connect(self._on_timer_tick)
+
+        # Progress bar state (only active when show_progress=True)
+        self._prog_start_dt = None
+        self._prog_end_dt = None
+        self._prog_state = "none"  # "none" | "pre-start" | "active" | "done"
+        self._prog_tick = QTimer(self)
+        self._prog_tick.setInterval(1000)
+        self._prog_tick.timeout.connect(self._on_progress_tick)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -566,6 +725,31 @@ class MiniViewPanel(QWidget):
         self._countdown.setVisible(False)
         header_layout.addWidget(self._countdown)
 
+        # ── Progress bar widgets (apenas quando show_progress=True) ──
+        if show_progress:
+            # Estado inicial: botão de bateria
+            self._prog_btn = QPushButton("🔋")
+            self._prog_btn.setObjectName("sidebar_btn")
+            self._prog_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            self._prog_btn.setToolTip("Configurar barra de progresso")
+            self._prog_btn.setFixedSize(28, 22)
+            self._prog_btn.setStyleSheet("font-size: 11px; padding: 2px 6px; min-width: 24px; min-height: 20px;")
+            self._prog_btn.clicked.connect(self._open_progress_modal)
+            header_layout.addWidget(self._prog_btn)
+
+            # Countdown para quando start_dt ainda não chegou
+            self._prog_countdown = _CountdownDisplay()
+            self._prog_countdown.setVisible(False)
+            self._prog_countdown.setToolTip("Aguardando início — clique para editar")
+            self._prog_countdown.clicked.connect(self._open_progress_modal)
+            header_layout.addWidget(self._prog_countdown)
+
+            # Barra de progresso propriamente dita
+            self._prog_bar = _ProgressWidget()
+            self._prog_bar.setVisible(False)
+            self._prog_bar.clicked.connect(self._on_progress_bar_clicked)
+            header_layout.addWidget(self._prog_bar)
+
         self._url_btn = QPushButton("▼")
         self._url_btn.setObjectName("sidebar_btn")
         self._url_btn.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -596,6 +780,9 @@ class MiniViewPanel(QWidget):
 
         if self._panel_id:
             self._load_timer()
+            self._load_urls()
+            if self._show_progress:
+                self._load_progress()
 
     def _switch_slot(self, slot: int):
         self._active_slot = slot
@@ -605,6 +792,7 @@ class MiniViewPanel(QWidget):
         url_str = url.toString()
         if url_str.startswith("http"):
             self._slot_urls[self._active_slot] = url_str
+            self._save_urls()
         if self._url_bar.isVisible():
             self._url_bar.setText(url_str)
 
@@ -625,6 +813,32 @@ class MiniViewPanel(QWidget):
             url = "https://" + url
         if url:
             self.view.load(QUrl(url))
+
+    def _save_urls(self):
+        if not self._panel_id:
+            return
+        try:
+            data = {}
+            if _URLS_FILE.exists():
+                data = json.loads(_URLS_FILE.read_text(encoding="utf-8"))
+            data[self._panel_id] = self._slot_urls
+            _URLS_FILE.parent.mkdir(parents=True, exist_ok=True)
+            _URLS_FILE.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        except Exception:
+            pass
+
+    def _load_urls(self):
+        try:
+            if not _URLS_FILE.exists():
+                return
+            data = json.loads(_URLS_FILE.read_text(encoding="utf-8"))
+            urls = data.get(self._panel_id)
+            if not urls or not isinstance(urls, list) or len(urls) < 2:
+                return
+            self._slot_urls = urls
+            self.view.load(QUrl(urls[self._active_slot]))
+        except Exception:
+            pass
 
     def _save_timer(self):
         if not self._panel_id:
@@ -680,6 +894,130 @@ class MiniViewPanel(QWidget):
             self._tick_timer.stop()
             self._target_dt = None
             self._save_timer()
+
+    # ── Progress bar methods (only active when show_progress=True) ──
+
+    def _open_progress_modal(self):
+        if not self._show_progress:
+            return
+        modal = ProgressModal(self._prog_start_dt, self._prog_end_dt, self.window())
+        if modal.exec() == QDialog.DialogCode.Accepted:
+            self._prog_start_dt = modal.selected_start()
+            self._prog_end_dt = modal.selected_end()
+            self._save_progress()
+            self._update_progress_display()
+            self._prog_tick.start()
+            self._on_progress_tick()
+
+    def _on_progress_bar_clicked(self):
+        """Click on the progress bar: if done, clear; otherwise open modal."""
+        if self._prog_state == "done":
+            self._clear_progress()
+        else:
+            self._open_progress_modal()
+
+    def _on_progress_tick(self):
+        if not self._show_progress or not self._prog_start_dt or not self._prog_end_dt:
+            return
+
+        now = QDateTime.currentDateTime()
+        secs_to_start = now.secsTo(self._prog_start_dt)
+        secs_to_end = now.secsTo(self._prog_end_dt)
+        total_secs = self._prog_start_dt.secsTo(self._prog_end_dt)
+
+        if secs_to_start > 0:
+            # Before start: show countdown to start time
+            if self._prog_state != "pre-start":
+                self._prog_state = "pre-start"
+                self._update_progress_display()
+            self._prog_countdown.update_display(secs_to_start)
+
+        elif secs_to_end > 0 and total_secs > 0:
+            # Active: show progress bar
+            elapsed = self._prog_start_dt.secsTo(now)
+            pct = max(0, min(100, int(elapsed * 100 / total_secs)))
+            if self._prog_state != "active":
+                self._prog_state = "active"
+                self._update_progress_display()
+            self._prog_bar.setValue(pct)
+
+        else:
+            # Finished
+            if self._prog_state != "done":
+                self._prog_state = "done"
+                self._update_progress_display()
+            self._prog_tick.stop()
+
+    def _update_progress_display(self):
+        """Show/hide the correct widget based on current progress state."""
+        if not self._show_progress:
+            return
+        state = self._prog_state
+        self._prog_btn.setVisible(state == "none")
+        self._prog_countdown.setVisible(state == "pre-start")
+        self._prog_bar.setVisible(state in ("active", "done"))
+        if state == "done":
+            self._prog_bar.set_done(True)
+        elif state == "active":
+            self._prog_bar.set_done(False)
+
+    def _clear_progress(self):
+        """Reset progress bar to initial battery-button state."""
+        self._prog_tick.stop()
+        self._prog_start_dt = None
+        self._prog_end_dt = None
+        self._prog_state = "none"
+        self._save_progress()
+        self._update_progress_display()
+
+    def _save_progress(self):
+        if not self._panel_id or not self._show_progress:
+            return
+        try:
+            data = {}
+            if _PROGRESS_FILE.exists():
+                data = json.loads(_PROGRESS_FILE.read_text(encoding="utf-8"))
+            if self._prog_start_dt and self._prog_end_dt:
+                data[self._panel_id] = {
+                    "start": self._prog_start_dt.toString(Qt.DateFormat.ISODate),
+                    "end": self._prog_end_dt.toString(Qt.DateFormat.ISODate),
+                }
+            else:
+                data.pop(self._panel_id, None)
+            _PROGRESS_FILE.parent.mkdir(parents=True, exist_ok=True)
+            _PROGRESS_FILE.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        except Exception:
+            pass
+
+    def _load_progress(self):
+        if not self._panel_id or not self._show_progress:
+            return
+        try:
+            if not _PROGRESS_FILE.exists():
+                return
+            data = json.loads(_PROGRESS_FILE.read_text(encoding="utf-8"))
+            entry = data.get(self._panel_id)
+            if not entry:
+                return
+            start = QDateTime.fromString(entry.get("start", ""), Qt.DateFormat.ISODate)
+            end = QDateTime.fromString(entry.get("end", ""), Qt.DateFormat.ISODate)
+            if not start.isValid() or not end.isValid() or start >= end:
+                return
+            self._prog_start_dt = start
+            self._prog_end_dt = end
+            # Determine initial state
+            now = QDateTime.currentDateTime()
+            if now.secsTo(end) <= 0:
+                self._prog_state = "done"
+            elif now.secsTo(start) > 0:
+                self._prog_state = "pre-start"
+            else:
+                self._prog_state = "active"
+            self._update_progress_display()
+            self._prog_tick.start()
+            self._on_progress_tick()
+        except Exception:
+            pass
 
 
 class MainWindow(QMainWindow):
@@ -756,18 +1094,16 @@ class MainWindow(QMainWindow):
         self._row3_splitter.setHandleWidth(6)
         self._row3_splitter.setChildrenCollapsible(False)
 
-        _AUX_URL = "https://google.com"
-
         view3 = self._engine.create_view(
-            "slot-2", url=_AUX_URL, inject_sidebar_toggle=False
+            "slot-2", url=_CLAUDE_URL, inject_sidebar_toggle=False
         )
         self._mini3 = MiniViewPanel("", view3, panel_id="mini3")
         self._row3_splitter.addWidget(self._mini3)
 
         view4 = self._engine.create_view(
-            "slot-1", url=_AUX_URL, inject_sidebar_toggle=False
+            "slot-1", url=_CLAUDE_URL, inject_sidebar_toggle=False
         )
-        self._mini4 = MiniViewPanel("", view4, panel_id="mini4")
+        self._mini4 = MiniViewPanel("", view4, panel_id="mini4", show_progress=True)
         self._row3_splitter.addWidget(self._mini4)
 
         self._row3_splitter.setStretchFactor(0, 1)
