@@ -9,12 +9,15 @@ _TIMERS_FILE = Path.home() / ".forging-tools" / "timers.json"
 _URLS_FILE = Path.home() / ".forging-tools" / "mini_urls.json"
 _PROGRESS_FILE = Path.home() / ".forging-tools" / "progress.json"
 
+# Remote debugging — abra chrome://inspect ou http://localhost:9222 para ver console JS
+os.environ["QTWEBENGINE_REMOTE_DEBUGGING"] = "9222"
+
 # Flags do Chromium ANTES de importar Qt — remove sinais de automação
 os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = " ".join([
     "--disable-blink-features=AutomationControlled",
     "--disable-features=IsolateOrigins,site-per-process,WebRtcHideLocalIpsWithMdns",
     "--disable-site-isolation-trials",
-    "--enable-features=WebRTCPipeWireCapturer,FileSystemAccessAPI,FileHandlingAPI",
+    "--enable-features=WebRTCPipeWireCapturer,FileSystemAccessAPI,FileHandlingAPI,SharedArrayBuffer,OffscreenCanvas",
     "--autoplay-policy=no-user-gesture-required",
     "--enable-clipboard-read-write",
 ])

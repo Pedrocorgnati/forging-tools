@@ -129,6 +129,12 @@ def _apply_page_settings(page):
     s.setAttribute(QWebEngineSettings.WebAttribute.LocalContentCanAccessRemoteUrls, True)
     s.setAttribute(QWebEngineSettings.WebAttribute.AllowRunningInsecureContent, True)
     s.setAttribute(QWebEngineSettings.WebAttribute.DnsPrefetchEnabled, True)
+    # CRITICO: sem isso, drop de arquivo NAVEGA para file:// ao invés de disparar
+    # o evento drop JS. Default é True no Qt 6.4+, precisa ser False.
+    s.setAttribute(QWebEngineSettings.WebAttribute.NavigateOnDropEnabled, False)
+    # Garante que canvas.toDataURL()/toBlob() funcione — WhatsApp usa canvas
+    # para o editor de imagem no preview dialog (mesmo bug do Brave browser)
+    s.setAttribute(QWebEngineSettings.WebAttribute.ReadingFromCanvasEnabled, True)
 
 
 class _PopupPage(QWebEnginePage):
@@ -210,6 +216,8 @@ _AUDIO_FIX_JS = """
     };
 
     // Spoof permissions API — WhatsApp checa antes de pedir mídia/clipboard/storage
+    // IMPORTANTE: retornar objeto que extende EventTarget, senão WhatsApp chama
+    // addEventListener('change', handler) e recebe TypeError silencioso
     if (navigator.permissions && navigator.permissions.query) {
         var _origQuery = navigator.permissions.query.bind(navigator.permissions);
         var _grantedPerms = [
@@ -220,7 +228,11 @@ _AUDIO_FIX_JS = """
         ];
         navigator.permissions.query = function(desc) {
             if (desc && _grantedPerms.indexOf(desc.name) !== -1) {
-                return Promise.resolve({ state: 'granted', onchange: null });
+                var status = new EventTarget();
+                status.state = 'granted';
+                status.name = desc.name;
+                status.onchange = null;
+                return Promise.resolve(status);
             }
             return _origQuery(desc);
         };
@@ -278,6 +290,11 @@ _FILE_PICKER_POLYFILL_JS = """
                         getFile: function() { return Promise.resolve(f); },
                         createWritable: function() {
                             return Promise.reject(new DOMException('Not supported', 'NotAllowedError'));
+                        },
+                        queryPermission: function() { return Promise.resolve('granted'); },
+                        requestPermission: function() { return Promise.resolve('granted'); },
+                        isSameEntry: function(other) {
+                            return Promise.resolve(other && other.name === f.name);
                         }
                     };
                 });
@@ -304,6 +321,86 @@ _FILE_PICKER_POLYFILL_JS = """
             return Promise.reject(new DOMException('Not supported', 'NotAllowedError'));
         };
     }
+})();
+"""
+
+# ── DataTransfer normalization + clipboard paste fix ──
+# QTBUG-53573: QtWebEngine adiciona um DataTransferItem extra comparado ao
+# Chrome padrão. datatransfer.items tem 2 items mas datatransfer.files tem 1.
+# WhatsApp itera items e encontra null no item fantasma, causando TypeError.
+# Este script intercepta drop e paste events para normalizar o DataTransfer.
+
+_DATATRANSFER_FIX_JS = """
+(function() {
+    // Fix 1: Normaliza DataTransfer em drop events (QTBUG-53573)
+    document.addEventListener('drop', function(e) {
+        if (!e.dataTransfer || !e.dataTransfer.files || e.dataTransfer.files.length === 0) return;
+
+        // Se items e files tem tamanhos diferentes, há o bug do Qt
+        var dt = e.dataTransfer;
+        if (dt.items && dt.items.length !== dt.files.length) {
+            // Cria um novo DataTransfer limpo com apenas os files reais
+            try {
+                var newDt = new DataTransfer();
+                for (var i = 0; i < dt.files.length; i++) {
+                    newDt.items.add(dt.files[i]);
+                }
+                // Substitui o dataTransfer do evento
+                Object.defineProperty(e, 'dataTransfer', {
+                    value: newDt,
+                    writable: false,
+                    configurable: true
+                });
+            } catch(err) {
+                // DataTransfer constructor pode não existir em versões antigas
+                console.warn('[forging-tools] DataTransfer fix failed:', err);
+            }
+        }
+    }, true);  // capture phase — roda ANTES dos handlers do WhatsApp
+
+    // Fix 2: Garante que paste de imagem funcione via clipboard API
+    document.addEventListener('paste', function(e) {
+        if (!e.clipboardData || !e.clipboardData.files || e.clipboardData.files.length === 0) return;
+
+        // Mesmo fix de normalização para paste events
+        var dt = e.clipboardData;
+        if (dt.items && dt.items.length !== dt.files.length) {
+            try {
+                var newDt = new DataTransfer();
+                for (var i = 0; i < dt.files.length; i++) {
+                    newDt.items.add(dt.files[i]);
+                }
+                Object.defineProperty(e, 'clipboardData', {
+                    value: newDt,
+                    writable: false,
+                    configurable: true
+                });
+            } catch(err) {
+                console.warn('[forging-tools] Clipboard fix failed:', err);
+            }
+        }
+    }, true);  // capture phase
+
+    // Fix 3: Garante que dragover aceita files (necessário para o drop funcionar)
+    document.addEventListener('dragover', function(e) {
+        if (e.dataTransfer && e.dataTransfer.types &&
+            (e.dataTransfer.types.indexOf('Files') !== -1 ||
+             e.dataTransfer.types.indexOf('application/x-moz-file') !== -1)) {
+            e.preventDefault();
+            e.dataTransfer.dropEffect = 'copy';
+        }
+    }, true);
+
+    document.addEventListener('dragenter', function(e) {
+        if (e.dataTransfer && e.dataTransfer.types &&
+            (e.dataTransfer.types.indexOf('Files') !== -1 ||
+             e.dataTransfer.types.indexOf('application/x-moz-file') !== -1)) {
+            e.preventDefault();
+            e.dataTransfer.dropEffect = 'copy';
+        }
+    }, true);
+
+    console.log('[forging-tools] DataTransfer + clipboard fixes loaded');
 })();
 """
 
@@ -621,6 +718,12 @@ class BrowserEngine(QObject):
         self._inject_script(page, "antidetect",
                             _ANTIDETECT_JS,
                             QWebEngineScript.InjectionPoint.DocumentCreation,
+                            runs_on_subframes=True)
+
+        # DataTransfer normalization + clipboard paste fix (QTBUG-53573)
+        self._inject_script(page, "datatransfer_fix",
+                            _DATATRANSFER_FIX_JS,
+                            QWebEngineScript.InjectionPoint.DocumentReady,
                             runs_on_subframes=True)
 
         # Sidebar toggle (WhatsApp)
