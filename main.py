@@ -23,7 +23,7 @@ os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = " ".join([
 ])
 
 from PySide6.QtCore import Qt, QPoint, QRect, QUrl, QEvent, QPropertyAnimation, QEasingCurve, Signal, QTimer, QDateTime
-from PySide6.QtGui import QMouseEvent
+from PySide6.QtGui import QColor, QMouseEvent, QPainter
 from PySide6.QtWidgets import (
     QApplication,
     QDateTimeEdit,
@@ -617,11 +617,12 @@ class _ProgressWidget(QProgressBar):
         self.setRange(0, 100)
         self.setValue(0)
         self.setFormat("%p%")
-        self.setTextVisible(True)
+        self.setTextVisible(False)  # texto desenhado manualmente com contorno
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setFixedHeight(22)
         self.setMinimumWidth(70)
         self.setToolTip("Clique para editar / limpar quando concluído")
+        self._done = False
         self._apply_style(done=False)
 
     def _apply_style(self, done: bool):
@@ -644,7 +645,25 @@ class _ProgressWidget(QProgressBar):
             }}
         """)
 
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        text = self.format().replace("%p", str(self.value()))
+        rect = self.rect()
+        painter.setFont(self.font())
+        # contorno preto (8 direções)
+        painter.setPen(QColor("#000000"))
+        for dx, dy in [(-1, 0), (1, 0), (0, -1), (0, 1), (-1, -1), (1, -1), (-1, 1), (1, 1)]:
+            painter.drawText(rect.translated(dx, dy), Qt.AlignmentFlag.AlignCenter, text)
+        # texto na cor original por cima
+        bar_color = SUCCESS if self._done else ACCENT_DARK
+        painter.setPen(QColor(bar_color))
+        painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, text)
+        painter.end()
+
     def set_done(self, done: bool):
+        self._done = done
         self._apply_style(done)
         if done:
             self.setValue(100)
