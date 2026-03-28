@@ -1106,7 +1106,7 @@ class MainWindow(QMainWindow):
         self._row3_collapse_btn.clicked.connect(self._toggle_row3)
         row3_layout.addWidget(self._row3_collapse_btn)
 
-        # Row 3 content: Two QWebEngine views (sessões compartilhadas)
+        # Row 3 content: Two QWebEngine views (sessões independentes)
         self._row3_content = QWidget()
         self._row3_content_layout = QVBoxLayout(self._row3_content)
         self._row3_content_layout.setContentsMargins(0, 0, 0, 0)
@@ -1117,13 +1117,13 @@ class MainWindow(QMainWindow):
         self._row3_splitter.setChildrenCollapsible(False)
 
         view3 = self._engine.create_view(
-            "slot-2", url=_CLAUDE_URL, inject_sidebar_toggle=False
+            "slot-3", url=_CLAUDE_URL, inject_sidebar_toggle=False
         )
         self._mini3 = MiniViewPanel("", view3, panel_id="mini3")
         self._row3_splitter.addWidget(self._mini3)
 
         view4 = self._engine.create_view(
-            "slot-1", url=_CLAUDE_URL, inject_sidebar_toggle=False
+            "slot-4", url=_CLAUDE_URL, inject_sidebar_toggle=False
         )
         self._mini4 = MiniViewPanel("", view4, panel_id="mini4", show_progress=True)
         self._row3_splitter.addWidget(self._mini4)
