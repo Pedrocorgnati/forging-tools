@@ -1,2 +1,4 @@
+# PySide6 (meta) ja inclui PySide6-Essentials + PySide6-Addons.
+# QtWebEngine (QtWebEngineCore/QtWebEngineWidgets) vive em PySide6-Addons —
+# NAO existe pacote separado "PySide6-WebEngine" no PyPI, instalar a meta cobre tudo.
 PySide6>=6.6.0
-PySide6-WebEngine>=6.6.0
