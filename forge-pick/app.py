@@ -12,6 +12,7 @@ import threading
 import time
 import tkinter as tk
 from pathlib import Path
+from tkinter import ttk
 
 # Resolve systemForge root: ai-forge/forging-tools/forge-pick/app.py -> go up 3 levels
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -32,8 +33,8 @@ def save_favorites(favs: set[str]) -> None:
     FAVORITES_FILE.write_text(json.dumps(sorted(favs), ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-def load_projects() -> list[tuple[str, str, str, str]]:
-    """Return list of (name, commercial_name, config_path, workspace_root) sorted by favorites first."""
+def load_projects() -> list[tuple]:
+    """Return list of (name, commercial_name, config_path, workspace_root, wbs_root, brief_root, docs_root)."""
     favorites = load_favorites()
     projects = []
     for json_file in sorted(PROJECTS_DIR.glob("*.json")):
@@ -42,8 +43,12 @@ def load_projects() -> list[tuple[str, str, str, str]]:
             name = data.get("name") or json_file.stem
             commercial = data.get("commercial_name") or name.replace("-", " ").title()
             rel_path = f".claude/projects/{json_file.name}"
-            workspace = data.get("basic_flow", {}).get("workspace_root", "")
-            projects.append((name, commercial, rel_path, workspace))
+            bf = data.get("basic_flow", {})
+            workspace  = bf.get("workspace_root", "") or ""
+            wbs_root   = bf.get("wbs_root",        "") or ""
+            brief_root = bf.get("brief_root",       "") or ""
+            docs_root  = bf.get("docs_root",        "") or ""
+            projects.append((name, commercial, rel_path, workspace, wbs_root, brief_root, docs_root))
         except Exception:
             pass
     projects.sort(key=lambda p: (0 if p[0] in favorites else 1, p[0].lower()))
@@ -51,7 +56,7 @@ def load_projects() -> list[tuple[str, str, str, str]]:
 
 
 def _type_worker(path: str) -> None:
-    """Wait 3 seconds then type path via xdotool."""
+    """Wait 2 seconds then type path via xdotool."""
     time.sleep(2)
     subprocess.run(
         ["xdotool", "type", "--clearmodifiers", "--", path],
@@ -65,9 +70,12 @@ SURFACE = "#313244"
 HOVER   = "#45475a"
 FG      = "#cdd6f4"
 MUTED   = "#6c7086"
-ACCENT  = "#89b4fa"   # blue — active/typing state
-GREEN   = "#a6e3a1"   # workspace button accent
-YELLOW  = "#f9e2af"   # favorite star colour
+ACCENT  = "#89b4fa"   # blue
+GREEN   = "#a6e3a1"
+YELLOW  = "#f9e2af"
+VIOLET  = "#b4befe"
+CYAN    = "#89dceb"
+ORANGE  = "#fab387"
 
 # ── fonts ─────────────────────────────────────────────────────────────────────
 FONT_TITLE    = ("Ubuntu", 13, "bold")
@@ -112,7 +120,6 @@ class RoundedButton(tk.Canvas):
         self._command = command
         self._disabled = disabled
 
-        # Measure text size to auto-size canvas
         dummy = tk.Label(font=font, text=text)
         tw = dummy.winfo_reqwidth()
         th = dummy.winfo_reqheight()
@@ -143,17 +150,15 @@ class RoundedButton(tk.Canvas):
     def _draw(self, fill: str) -> None:
         self.delete("all")
         r, w, h = self._radius, self._btn_w, self._btn_h
-        # Draw rounded rectangle via polygon + arcs
         self.create_arc(0, 0, r*2, r*2, start=90, extent=90, fill=fill, outline=fill)
         self.create_arc(w-r*2, 0, w, r*2, start=0, extent=90, fill=fill, outline=fill)
         self.create_arc(0, h-r*2, r*2, h, start=180, extent=90, fill=fill, outline=fill)
         self.create_arc(w-r*2, h-r*2, w, h, start=270, extent=90, fill=fill, outline=fill)
         self.create_rectangle(r, 0, w-r, h, fill=fill, outline=fill)
         self.create_rectangle(0, r, w, h-r, fill=fill, outline=fill)
-        # Text
         x = r if self._anchor == "w" else w // 2
         anchor = "w" if self._anchor == "w" else "center"
-        self._label_id = self.create_text(
+        self.create_text(
             x + (self._padx - r if self._anchor == "w" else 0),
             h // 2,
             text=self._text,
@@ -177,7 +182,7 @@ class RoundedButton(tk.Canvas):
         self._bg = bg
         self._fg = fg
         self._text = text
-        if bg == BG or bg == SURFACE or bg == GREEN:
+        if bg not in (BG,):
             self._disabled = False
             self.configure(cursor="hand2")
         self._draw(bg)
@@ -232,19 +237,20 @@ class ForgePick(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
         self.title("Forge Pick")
-        self.resizable(False, False)
+        self.resizable(True, True)
+        self.minsize(420, 200)
+        self.geometry("480x520")
         self.configure(bg=BG)
         self._build_header()
-        tk.Frame(self, bg=SURFACE, height=1).pack(fill="x", padx=16, pady=(0, 8))
-        self._buttons_frame = tk.Frame(self, bg=BG)
-        self._buttons_frame.pack(fill="both", expand=True, padx=16, pady=(0, 12))
+        tk.Frame(self, bg=SURFACE, height=1).pack(fill="x", padx=16, pady=(0, 4))
+        self._build_scrollable_area()
         self._load_buttons()
 
     # ── header ────────────────────────────────────────────────────────────────
 
     def _build_header(self) -> None:
         header = tk.Frame(self, bg=BG)
-        header.pack(fill="x", padx=16, pady=(14, 8))
+        header.pack(fill="x", padx=16, pady=(12, 6))
 
         left = tk.Frame(header, bg=BG)
         left.pack(side="left")
@@ -260,6 +266,66 @@ class ForgePick(tk.Tk):
             pady=6,
             anchor="center",
         ).pack(side="right")
+
+    # ── scrollable area ───────────────────────────────────────────────────────
+
+    def _build_scrollable_area(self) -> None:
+        container = tk.Frame(self, bg=BG)
+        container.pack(fill="both", expand=True, padx=16, pady=(0, 10))
+        container.grid_rowconfigure(0, weight=1)
+        container.grid_columnconfigure(0, weight=1)
+
+        # Scrollbar vertical (ttk para ficar estilizado)
+        style = ttk.Style()
+        style.theme_use("clam")
+        style.configure(
+            "FP.Vertical.TScrollbar",
+            troughcolor=BG,
+            background=SURFACE,
+            arrowcolor=MUTED,
+            bordercolor=BG,
+            lightcolor=SURFACE,
+            darkcolor=SURFACE,
+        )
+
+        self._canvas = tk.Canvas(container, bg=BG, highlightthickness=0)
+        scrollbar = ttk.Scrollbar(
+            container, orient="vertical",
+            command=self._canvas.yview,
+            style="FP.Vertical.TScrollbar",
+        )
+        self._canvas.configure(yscrollcommand=scrollbar.set)
+
+        self._canvas.grid(row=0, column=0, sticky="nsew")
+        scrollbar.grid(row=0, column=1, sticky="ns")
+
+        # Frame interno do canvas (onde as linhas são inseridas)
+        self._buttons_frame = tk.Frame(self._canvas, bg=BG)
+        self._canvas_window = self._canvas.create_window(
+            (0, 0), window=self._buttons_frame, anchor="nw"
+        )
+
+        self._buttons_frame.bind("<Configure>", self._on_frame_configure)
+        self._canvas.bind("<Configure>", self._on_canvas_resize)
+
+        # Scroll via mouse wheel
+        self._canvas.bind_all("<MouseWheel>",    self._on_mousewheel)
+        self._canvas.bind_all("<Button-4>",      self._on_mousewheel)
+        self._canvas.bind_all("<Button-5>",      self._on_mousewheel)
+
+    def _on_frame_configure(self, _event=None) -> None:
+        self._canvas.configure(scrollregion=self._canvas.bbox("all"))
+
+    def _on_canvas_resize(self, event) -> None:
+        self._canvas.itemconfig(self._canvas_window, width=event.width)
+
+    def _on_mousewheel(self, event) -> None:
+        if event.num == 4:
+            self._canvas.yview_scroll(-1, "units")
+        elif event.num == 5:
+            self._canvas.yview_scroll(1, "units")
+        elif hasattr(event, "delta"):
+            self._canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
 
     # ── buttons ───────────────────────────────────────────────────────────────
 
@@ -278,72 +344,76 @@ class ForgePick(tk.Tk):
             ).pack(pady=16)
             return
 
-        for name, commercial, path, workspace in projects:
-            self._make_row(name, commercial, path, workspace)
+        for name, commercial, path, workspace, wbs_root, brief_root, docs_root in projects:
+            self._make_row(name, commercial, path, workspace, wbs_root, brief_root, docs_root)
 
-    def _make_row(self, name: str, commercial: str, path: str, workspace: str) -> None:
-        row = tk.Frame(self._buttons_frame, bg=BG)
-        row.pack(fill="x", pady=(0, 5))
+        self._on_frame_configure()
 
-        # favourite dot
-        FavDot(row, name, on_toggle=self._load_buttons).pack(
+    def _make_row(
+        self,
+        name: str,
+        commercial: str,
+        path: str,
+        workspace: str,
+        wbs_root: str,
+        brief_root: str,
+        docs_root: str,
+    ) -> None:
+        outer = tk.Frame(self._buttons_frame, bg=BG)
+        outer.pack(fill="x", pady=(0, 4))
+
+        # ── Linha 1: fav dot + nome ──
+        top = tk.Frame(outer, bg=BG)
+        top.pack(fill="x")
+
+        FavDot(top, name, on_toggle=self._load_buttons).pack(
             side="left", padx=(0, 6), anchor="center"
         )
 
-        # commercial name label — fills available width
-        name_frame = tk.Frame(row, bg=BG)
-        name_frame.pack(side="left", fill="x", expand=True)
         tk.Label(
-            name_frame,
+            top,
             text=commercial,
             font=FONT_BTN,
             bg=BG,
             fg=FG,
             anchor="w",
-        ).pack(fill="x", padx=(6, 0), anchor="w")
+        ).pack(side="left", fill="x", expand=True)
 
-        # JSON button (yellow text, small fixed width)
-        BTN_W = 50
-        json_btn = RoundedButton(
-            row,
-            text="JSON",
-            font=FONT_WS,
-            bg=SURFACE,
-            fg=YELLOW,
-            hover_bg=HOVER,
-            padx=10,
-            pady=8,
-            anchor="center",
-        )
-        json_btn.pack(side="right", padx=(4, 0))
-        json_btn.configure(width=BTN_W)
-        json_btn._btn_w = BTN_W
-        json_btn._draw(json_btn._bg)
-        json_btn.set_command(
-            lambda b=json_btn, p=path, n="JSON": self._click(b, n, p, SURFACE, YELLOW)
-        )
+        # ── Linha 2: botões de ação ──
+        btns = tk.Frame(outer, bg=BG)
+        btns.pack(fill="x", pady=(2, 0))
 
-        # WS button (same small fixed width)
-        ws_btn = RoundedButton(
-            row,
-            text="WS",
-            font=FONT_WS,
-            bg=SURFACE if workspace else BG,
-            fg=GREEN if workspace else MUTED,
-            hover_bg=HOVER if workspace else BG,
-            padx=10,
-            pady=8,
-            anchor="center",
-            disabled=not workspace,
-        )
-        ws_btn.pack(side="right", padx=(4, 0))
-        ws_btn.configure(width=BTN_W)
-        ws_btn._btn_w = BTN_W
-        ws_btn._draw(ws_btn._bg)
-        if workspace:
-            ws_btn.set_command(
-                lambda b=ws_btn, w=workspace: self._click(b, "WS", w, SURFACE, GREEN)
+        _BTN_PADY = 5
+        _BTN_PADX = 8
+
+        for text, value, fg_color in [
+            ("JSON",  path,       YELLOW),
+            ("WS",    workspace,  GREEN),
+            ("wbs",   wbs_root,   VIOLET),
+            ("brief", brief_root, CYAN),
+            ("docs",  docs_root,  ORANGE),
+        ]:
+            disabled = not bool(value)
+            btn = RoundedButton(
+                btns,
+                text=text,
+                font=FONT_WS,
+                bg=SURFACE if not disabled else BG,
+                fg=fg_color if not disabled else MUTED,
+                hover_bg=HOVER if not disabled else BG,
+                padx=_BTN_PADX,
+                pady=_BTN_PADY,
+                anchor="center",
+                disabled=disabled,
             )
+            btn.pack(side="left", padx=(0, 4))
+            if not disabled:
+                btn.set_command(
+                    lambda b=btn, v=value, t=text, f=fg_color: self._click(b, t, v, SURFACE, f)
+                )
+
+        # Separador fino
+        tk.Frame(self._buttons_frame, bg=SURFACE, height=1).pack(fill="x", pady=(2, 0))
 
     def _click(
         self,

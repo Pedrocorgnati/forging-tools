@@ -90,7 +90,7 @@ def _toggle_favorite(name: str) -> None:
 
 
 def _load_all_projects() -> list:
-    """Return list of (name, commercial_name, config_path, workspace_root)."""
+    """Return list of (name, commercial_name, config_path, workspace_root, wbs_root, brief_root, docs_root)."""
     projects = []
     if not _PROJECTS_DIR.is_dir():
         return projects
@@ -100,8 +100,12 @@ def _load_all_projects() -> list:
             name = data.get("name") or json_file.stem
             commercial = data.get("commercial_name") or name.replace("-", " ").title()
             rel_path = f".claude/projects/{json_file.name}"
-            workspace = data.get("basic_flow", {}).get("workspace_root", "")
-            projects.append((name, commercial, rel_path, workspace))
+            bf = data.get("basic_flow", {})
+            workspace  = bf.get("workspace_root", "") or ""
+            wbs_root   = bf.get("wbs_root",        "") or ""
+            brief_root = bf.get("brief_root",       "") or ""
+            docs_root  = bf.get("docs_root",        "") or ""
+            projects.append((name, commercial, rel_path, workspace, wbs_root, brief_root, docs_root))
         except Exception:
             pass
     return projects
@@ -146,7 +150,7 @@ class _FavDot(QPushButton):
 
 
 class _ActionBtn(QPushButton):
-    """Small action button (JSON / WS) with typing functionality."""
+    """Small action button (JSON / WS / wbs / brief / docs) with typing functionality."""
 
     def __init__(self, text: str, path: str, color: str, enabled: bool = True, parent=None):
         super().__init__(text, parent)
@@ -155,20 +159,21 @@ class _ActionBtn(QPushButton):
         self._orig_text = text
         self._typing = False
 
-        self.setFixedSize(42, 24)
+        self.setFixedHeight(20)
+        self.setMinimumWidth(28)
         self.setCursor(Qt.CursorShape.PointingHandCursor if enabled else Qt.CursorShape.ArrowCursor)
         self.setEnabled(enabled)
 
         if enabled:
             self.setStyleSheet(
                 f"QPushButton {{ background: {SURFACE}; color: {color}; border: 1px solid {BORDER_LIGHT}; "
-                f"border-radius: {R_SM}px; font-size: 10px; font-weight: bold; padding: 2px 4px; }}"
+                f"border-radius: {R_SM}px; font-size: 9px; font-weight: bold; padding: 1px 4px; }}"
                 f"QPushButton:hover {{ background: {SURFACE_HOVER}; border-color: {color}; }}"
             )
         else:
             self.setStyleSheet(
                 f"QPushButton {{ background: {BG}; color: {TEXT_TERT}; border: 1px solid {BG}; "
-                f"border-radius: {R_SM}px; font-size: 10px; padding: 2px 4px; }}"
+                f"border-radius: {R_SM}px; font-size: 9px; padding: 1px 4px; }}"
             )
 
         if enabled:
@@ -461,8 +466,8 @@ class ForgePickPanel(QWidget):
         # ── Favorites section (draggable) ──
         if fav_projects:
             fav_container = _FavoritesContainer(self._on_fav_reordered)
-            for name, commercial, path, workspace in fav_projects:
-                row = self._make_row(name, commercial, path, workspace, is_fav=True)
+            for name, commercial, path, workspace, wbs_root, brief_root, docs_root in fav_projects:
+                row = self._make_row(name, commercial, path, workspace, wbs_root, brief_root, docs_root, is_fav=True)
                 fav_container.add_row(name, row)
             self._list_layout.addWidget(fav_container)
 
@@ -474,50 +479,61 @@ class ForgePickPanel(QWidget):
             self._list_layout.addWidget(sep)
 
         # ── Non-favorites section (regular) ──
-        for name, commercial, path, workspace in other_projects:
-            row = self._make_row(name, commercial, path, workspace, is_fav=False)
+        for name, commercial, path, workspace, wbs_root, brief_root, docs_root in other_projects:
+            row = self._make_row(name, commercial, path, workspace, wbs_root, brief_root, docs_root, is_fav=False)
             self._list_layout.addWidget(row)
 
     def _make_row(
-        self, name: str, commercial: str, path: str, workspace: str, is_fav: bool
+        self, name: str, commercial: str, path: str, workspace: str,
+        wbs_root: str, brief_root: str, docs_root: str, is_fav: bool,
     ) -> QFrame:
         row = QFrame()
         row.setStyleSheet(
             f"QFrame {{ background: transparent; border-radius: {R_SM}px; }}"
             f"QFrame:hover {{ background: {SURFACE}; }}"
         )
-        row_layout = QHBoxLayout(row)
-        row_layout.setContentsMargins(4, 3, 4, 3)
-        row_layout.setSpacing(5)
+        outer = QVBoxLayout(row)
+        outer.setContentsMargins(4, 3, 4, 2)
+        outer.setSpacing(2)
+
+        # ── Linha 1: drag handle + fav dot + label ──
+        top = QHBoxLayout()
+        top.setContentsMargins(0, 0, 0, 0)
+        top.setSpacing(5)
 
         if is_fav:
-            # Drag handle — pass row reference for pixmap grab (set after full construction)
             handle = _DragHandle(name, row)
-            row_layout.addWidget(handle)
+            top.addWidget(handle)
 
         fav = _FavDot(name, self._reload, row)
-        row_layout.addWidget(fav)
+        top.addWidget(fav)
 
         label = QLabel(commercial)
-        if is_fav:
-            # Bold + 2px larger font for favorites
-            label.setStyleSheet(
-                f"color: {TEXT}; font-size: 13px; font-weight: bold; background: transparent;"
-            )
-            label.setMaximumWidth(100)  # slightly narrower to accommodate drag handle
-        else:
-            label.setStyleSheet(
-                f"color: {TEXT}; font-size: 11px; background: transparent;"
-            )
-            label.setMaximumWidth(112)
+        label.setStyleSheet(
+            f"color: {TEXT}; font-size: {'12px' if is_fav else '11px'}; "
+            f"{'font-weight: bold; ' if is_fav else ''}background: transparent;"
+        )
         label.setWordWrap(False)
         label.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
-        row_layout.addWidget(label, 1)
+        top.addWidget(label, 1)
+        outer.addLayout(top)
 
-        json_btn = _ActionBtn("JSON", path, _YELLOW, True, row)
-        row_layout.addWidget(json_btn)
+        # ── Linha 2: botões de ação ──
+        btns = QHBoxLayout()
+        btns.setContentsMargins(0, 0, 0, 0)
+        btns.setSpacing(3)
 
-        ws_btn = _ActionBtn("WS", workspace, _SUCCESS, bool(workspace), row)
-        row_layout.addWidget(ws_btn)
+        for text, value, color in [
+            ("JSON",  path,       _YELLOW),
+            ("WS",    workspace,  _SUCCESS),
+            ("wbs",   wbs_root,   "#A78BFA"),
+            ("brief", brief_root, "#22D3EE"),
+            ("docs",  docs_root,  "#FB923C"),
+        ]:
+            btn = _ActionBtn(text, value, color, bool(value), row)
+            btns.addWidget(btn)
+
+        btns.addStretch(1)
+        outer.addLayout(btns)
 
         return row

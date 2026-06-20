@@ -22,14 +22,13 @@ os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = " ".join([
     "--enable-clipboard-read-write",
 ])
 
-from PySide6.QtCore import Qt, QPoint, QRect, QUrl, QEvent, QPropertyAnimation, QEasingCurve, Signal, QTimer, QDateTime
+from PySide6.QtCore import Qt, QPoint, QRect, QUrl, QEvent, Signal, QTimer, QDateTime
 from PySide6.QtGui import QColor, QMouseEvent, QPainter
 from PySide6.QtWidgets import (
     QApplication,
     QDateTimeEdit,
     QDialog,
     QFrame,
-    QHBoxLayout,
     QLabel,
     QLineEdit,
     QMainWindow,
@@ -252,9 +251,7 @@ class BrowserRow(QWidget):
         self._url2 = url2
         self._url3 = url3
         self._sidebar_panel = None
-        self._sidebar_border = None
         self._sidebar_visible = False
-        self._sidebar_anim = None
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -271,14 +268,18 @@ class BrowserRow(QWidget):
         self._url_bar.setVisible(False)
         outer.addWidget(self._url_bar)
 
-        # Content area: horizontal layout for sidebar + browser
+        # Content area: splitter para sidebar redimensionável + browser
         self._content = QWidget()
-        self._content_layout = QHBoxLayout(self._content)
-        self._content_layout.setContentsMargins(0, 0, 0, 0)
-        self._content_layout.setSpacing(0)
+        _clayout = QVBoxLayout(self._content)
+        _clayout.setContentsMargins(0, 0, 0, 0)
+        _clayout.setSpacing(0)
+        self._content_splitter = QSplitter(Qt.Orientation.Horizontal)
+        self._content_splitter.setHandleWidth(4)
+        self._content_splitter.setChildrenCollapsible(True)
+        _clayout.addWidget(self._content_splitter)
 
         self.view = engine.create_view(slot_id, inject_sidebar_toggle=True)
-        self._content_layout.addWidget(self.view)
+        self._content_splitter.addWidget(self.view)
         outer.addWidget(self._content)
 
         self.header.sidebar_btn.clicked.connect(self._toggle_sidebar)
@@ -293,61 +294,33 @@ class BrowserRow(QWidget):
             if self._url_bar.isVisible() else None
         )
 
-    def set_sidebar(self, panel: QWidget, width: int = 260):
-        """Attach a sidebar panel (inserted at left, hidden initially)."""
+    def set_sidebar(self, panel: QWidget, width: int = 280):
+        """Attach a resizable sidebar panel at the left of the content splitter."""
         self._sidebar_panel = panel
         self._sidebar_width = width
-        panel.setMinimumWidth(0)
-        panel.setMaximumWidth(0)
+        panel.setMinimumWidth(140)
         panel.setVisible(False)
-        self._content_layout.insertWidget(0, panel)
-
-        # Borda decorativa de alto relevo à direita do painel
-        border = QFrame()
-        border.setFixedWidth(5)
-        border.setVisible(False)
-        border.setStyleSheet(
-            "background: qlineargradient(x1:0, y1:0, x2:1, y2:0, "
-            f"stop:0 {BORDER}, stop:0.35 {TEXT_SEC}, stop:0.65 {BORDER}, stop:1 {BG});"
-        )
-        self._sidebar_border = border
-        self._content_layout.insertWidget(1, border)
+        self._content_splitter.insertWidget(0, panel)
+        self._content_splitter.setStretchFactor(0, 0)
+        self._content_splitter.setStretchFactor(1, 1)
+        # Colapsa o painel inicialmente
+        self._content_splitter.setSizes([0, max(1, self._content_splitter.width())])
 
     def toggle_sidebar_panel(self):
-        """Slide the sidebar panel in/out horizontally."""
+        """Mostra/oculta o painel sidebar via splitter (redimensionável via handle)."""
         if not self._sidebar_panel:
             return
         self._sidebar_visible = not self._sidebar_visible
         panel = self._sidebar_panel
-        target_w = self._sidebar_width
-
-        # Garante que minimumWidth não bloqueie a animação
-        panel.setMinimumWidth(0)
 
         if self._sidebar_visible:
             panel.setVisible(True)
-
-        anim = QPropertyAnimation(panel, b"maximumWidth", self)
-        anim.setDuration(200)
-        anim.setEasingCurve(QEasingCurve.Type.InOutQuad)
-        anim.setStartValue(panel.maximumWidth())
-        anim.setEndValue(target_w if self._sidebar_visible else 0)
-
-        if not self._sidebar_visible:
-            anim.finished.connect(lambda: (
-                panel.setVisible(False),
-                self._sidebar_border.setVisible(False) if self._sidebar_border else None,
-            ))
+            total = self._content_splitter.width() or (self._sidebar_width * 3)
+            self._content_splitter.setSizes([self._sidebar_width, max(1, total - self._sidebar_width)])
         else:
-            # setFixedWidth trava min e max no mesmo valor — impede o layout de
-            # colapsar o painel quando view.load() dispara eventos de relayout
-            anim.finished.connect(lambda: (
-                panel.setFixedWidth(target_w),
-                self._sidebar_border.setVisible(True) if self._sidebar_border else None,
-            ))
+            self._content_splitter.setSizes([0, max(1, self._content_splitter.width())])
+            panel.setVisible(False)
 
-        anim.start()
-        self._sidebar_anim = anim
         return self._sidebar_visible
 
     def _toggle_sidebar(self):
