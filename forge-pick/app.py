@@ -241,6 +241,8 @@ class ForgePick(tk.Tk):
         self.minsize(420, 200)
         self.geometry("480x520")
         self.configure(bg=BG)
+        self._search_var = tk.StringVar()
+        self._search_var.trace_add("write", lambda *_: self._load_buttons())
         self._build_header()
         tk.Frame(self, bg=SURFACE, height=1).pack(fill="x", padx=16, pady=(0, 4))
         self._build_scrollable_area()
@@ -266,6 +268,27 @@ class ForgePick(tk.Tk):
             pady=6,
             anchor="center",
         ).pack(side="right")
+
+        # search box — filtra a lista de projetos ao vivo
+        search_wrap = tk.Frame(header, bg=SURFACE, highlightthickness=0, bd=0)
+        search_wrap.pack(side="right", padx=(0, 8), pady=4)
+        tk.Label(search_wrap, text="⌕", font=("Ubuntu", 11), bg=SURFACE, fg=MUTED).pack(
+            side="left", padx=(8, 2)
+        )
+        search_entry = tk.Entry(
+            search_wrap,
+            textvariable=self._search_var,
+            font=FONT_PATH,
+            width=18,
+            bg=SURFACE,
+            fg=FG,
+            insertbackground=FG,
+            relief="flat",
+            bd=0,
+            highlightthickness=0,
+        )
+        search_entry.pack(side="left", padx=(0, 8), pady=6, ipady=2)
+        search_entry.bind("<Escape>", lambda _e: self._search_var.set(""))
 
     # ── scrollable area ───────────────────────────────────────────────────────
 
@@ -334,10 +357,17 @@ class ForgePick(tk.Tk):
             widget.destroy()
 
         projects = load_projects()
+        query = self._search_var.get().strip().lower()
+        if query:
+            projects = [
+                p for p in projects
+                if query in p[0].lower() or query in p[1].lower()
+            ]
+
         if not projects:
             tk.Label(
                 self._buttons_frame,
-                text="Nenhum projeto encontrado.",
+                text="Nenhum projeto corresponde." if query else "Nenhum projeto encontrado.",
                 font=FONT_PATH,
                 bg=BG,
                 fg=MUTED,
