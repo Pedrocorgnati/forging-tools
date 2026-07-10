@@ -33,8 +33,57 @@ def save_favorites(favs: set[str]) -> None:
     FAVORITES_FILE.write_text(json.dumps(sorted(favs), ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+def _extract_github_path(data: dict) -> str:
+    """Extract the best available GitHub string from a project JSON."""
+    github_data = data.get("github")
+    if isinstance(github_data, str):
+        return github_data
+    if isinstance(github_data, dict):
+        return (
+            github_data.get("ssh_url", "")
+            or github_data.get("url", "")
+            or (
+                f"https://github.com/{github_data['owner']}/{github_data['repo_slug']}"
+                if github_data.get("owner") and github_data.get("repo_slug")
+                else ""
+            )
+        )
+
+    credentials = data.get("credentials", {})
+    credentials_github = credentials.get("github", {})
+    if isinstance(credentials_github, dict):
+        return (
+            credentials_github.get("ssh_url", "")
+            or credentials_github.get("url", "")
+            or (
+                f"https://github.com/{credentials_github['owner']}/{credentials_github['repo_slug']}"
+                if credentials_github.get("owner") and credentials_github.get("repo_slug")
+                else ""
+            )
+        )
+
+    bf = data.get("basic_flow", {})
+    return bf.get("github_ssh", "") or bf.get("github", "")
+
+
+def _read_workspace_file(workspace_root: str, filename: str) -> str:
+    """Read a file from the workspace root of a project."""
+    if not workspace_root:
+        return ""
+
+    workspace_path = Path(workspace_root)
+    if not workspace_path.is_absolute():
+        workspace_path = FORGE_ROOT / workspace_path
+
+    target = workspace_path / filename
+    try:
+        return target.read_text(encoding="utf-8")
+    except Exception:
+        return ""
+
+
 def load_projects() -> list[tuple]:
-    """Return list of (name, commercial_name, config_path, workspace_root, wbs_root, brief_root, docs_root)."""
+    """Return list of project entries shown in the launcher."""
     favorites = load_favorites()
     projects = []
     for json_file in sorted(PROJECTS_DIR.glob("*.json")):
@@ -48,7 +97,23 @@ def load_projects() -> list[tuple]:
             wbs_root   = bf.get("wbs_root",        "") or ""
             brief_root = bf.get("brief_root",       "") or ""
             docs_root  = bf.get("docs_root",        "") or ""
-            projects.append((name, commercial, rel_path, workspace, wbs_root, brief_root, docs_root))
+            github = _extract_github_path(data)
+            env_content = _read_workspace_file(workspace, ".env")
+            env_production_content = _read_workspace_file(workspace, ".env.production")
+            projects.append(
+                (
+                    name,
+                    commercial,
+                    rel_path,
+                    workspace,
+                    wbs_root,
+                    brief_root,
+                    docs_root,
+                    github,
+                    env_content,
+                    env_production_content,
+                )
+            )
         except Exception:
             pass
     projects.sort(key=lambda p: (0 if p[0] in favorites else 1, p[0].lower()))
@@ -374,8 +439,19 @@ class ForgePick(tk.Tk):
             ).pack(pady=16)
             return
 
-        for name, commercial, path, workspace, wbs_root, brief_root, docs_root in projects:
-            self._make_row(name, commercial, path, workspace, wbs_root, brief_root, docs_root)
+        for name, commercial, path, workspace, wbs_root, brief_root, docs_root, github, env_content, env_production_content in projects:
+            self._make_row(
+                name,
+                commercial,
+                path,
+                workspace,
+                wbs_root,
+                brief_root,
+                docs_root,
+                github,
+                env_content,
+                env_production_content,
+            )
 
         self._on_frame_configure()
 
@@ -388,6 +464,9 @@ class ForgePick(tk.Tk):
         wbs_root: str,
         brief_root: str,
         docs_root: str,
+        github: str,
+        env_content: str,
+        env_production_content: str,
     ) -> None:
         outer = tk.Frame(self._buttons_frame, bg=BG)
         outer.pack(fill="x", pady=(0, 4))
@@ -422,6 +501,9 @@ class ForgePick(tk.Tk):
             ("wbs",   wbs_root,   VIOLET),
             ("brief", brief_root, CYAN),
             ("docs",  docs_root,  ORANGE),
+            ("github", github,    ACCENT),
+            (".env", env_content, FG),
+            (".env.production", env_production_content, FG),
         ]:
             disabled = not bool(value)
             btn = RoundedButton(
