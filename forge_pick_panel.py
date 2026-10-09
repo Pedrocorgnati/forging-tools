@@ -4,6 +4,7 @@ Reads .claude/projects/*.json and types the relative path
 on button click via xdotool after a 2-second delay.
 """
 import json
+import shutil
 import subprocess
 import threading
 import time
@@ -120,6 +121,78 @@ def _type_worker(path: str) -> None:
     )
 
 
+def _resolve_workspace_dir(workspace: str) -> Path | None:
+    """Return absolute existing directory for a project's workspace_root."""
+    if not workspace or not str(workspace).strip():
+        return None
+    path = Path(str(workspace).strip()).expanduser()
+    if not path.is_absolute():
+        path = _FORGE_ROOT / path
+    try:
+        path = path.resolve()
+    except OSError:
+        return None
+    return path if path.is_dir() else None
+
+
+def _open_linux_terminal(cwd: Path) -> bool:
+    """Open a system terminal with cwd set to the project workspace."""
+    cwd_s = str(cwd)
+    candidates = (
+        ("gnome-terminal", ["--working-directory", cwd_s]),
+        ("ptyxis", ["--new-window", "--directory", cwd_s]),
+        ("kgx", ["--working-directory", cwd_s]),
+        ("konsole", ["--workdir", cwd_s]),
+        ("xfce4-terminal", [f"--working-directory={cwd_s}"]),
+        ("mate-terminal", [f"--working-directory={cwd_s}"]),
+        ("tilix", [f"--working-directory={cwd_s}"]),
+        ("terminator", [f"--working-directory={cwd_s}"]),
+        ("kitty", ["--directory", cwd_s]),
+        ("alacritty", ["--working-directory", cwd_s]),
+        ("wezterm", ["start", "--cwd", cwd_s]),
+        ("ghostty", [f"--working-directory={cwd_s}"]),
+        ("x-terminal-emulator", []),
+        ("xdg-terminal-exec", []),
+        ("xterm", []),
+    )
+    for binary, args in candidates:
+        if shutil.which(binary) is None:
+            continue
+        try:
+            subprocess.Popen(
+                [binary, *args],
+                cwd=cwd_s,
+                start_new_session=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            return True
+        except OSError:
+            continue
+    return False
+
+
+def _open_vscode(cwd: Path) -> bool:
+    """Open VS Code at the project workspace path."""
+    cwd_s = str(cwd)
+    candidates = ("code", "code-insiders", "codium", "code-oss")
+    for binary in candidates:
+        if shutil.which(binary) is None:
+            continue
+        try:
+            subprocess.Popen(
+                [binary, cwd_s],
+                cwd=cwd_s,
+                start_new_session=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            return True
+        except OSError:
+            continue
+    return False
+
+
 # ── Widgets ──
 
 class _FavDot(QPushButton):
@@ -152,17 +225,29 @@ class _FavDot(QPushButton):
 class _ActionBtn(QPushButton):
     """Small action button (JSON / WS / wbs / brief / docs) with typing functionality."""
 
-    def __init__(self, text: str, path: str, color: str, enabled: bool = True, parent=None):
+    def __init__(
+        self,
+        text: str,
+        path: str,
+        color: str,
+        enabled: bool = True,
+        parent=None,
+        on_click=None,
+        tooltip: str = "",
+    ):
         super().__init__(text, parent)
         self._path = path
         self._color = color
         self._orig_text = text
         self._typing = False
+        self._custom_click = on_click
 
         self.setFixedHeight(20)
         self.setMinimumWidth(28)
         self.setCursor(Qt.CursorShape.PointingHandCursor if enabled else Qt.CursorShape.ArrowCursor)
         self.setEnabled(enabled)
+        if tooltip:
+            self.setToolTip(tooltip)
 
         if enabled:
             self.setStyleSheet(
@@ -180,6 +265,9 @@ class _ActionBtn(QPushButton):
             self.clicked.connect(self._on_click)
 
     def _on_click(self):
+        if self._custom_click is not None:
+            self._custom_click()
+            return
         threading.Thread(target=_type_worker, args=(self._path,), daemon=True).start()
 
 
@@ -522,6 +610,29 @@ class ForgePickPanel(QWidget):
         btns = QHBoxLayout()
         btns.setContentsMargins(0, 0, 0, 0)
         btns.setSpacing(3)
+
+        ws_dir = _resolve_workspace_dir(workspace)
+        term_btn = _ActionBtn(
+            "Terminal",
+            str(ws_dir) if ws_dir else "",
+            ACCENT,
+            ws_dir is not None,
+            row,
+            on_click=(lambda d=ws_dir: _open_linux_terminal(d)) if ws_dir else None,
+            tooltip=f"Abrir terminal em {ws_dir}" if ws_dir else "workspace_root indisponivel",
+        )
+        btns.addWidget(term_btn)
+
+        vscode_btn = _ActionBtn(
+            "Vs code",
+            str(ws_dir) if ws_dir else "",
+            ACCENT,
+            ws_dir is not None,
+            row,
+            on_click=(lambda d=ws_dir: _open_vscode(d)) if ws_dir else None,
+            tooltip=f"Abrir VS Code em {ws_dir}" if ws_dir else "workspace_root indisponivel",
+        )
+        btns.addWidget(vscode_btn)
 
         for text, value, color in [
             ("JSON",  path,       _YELLOW),
